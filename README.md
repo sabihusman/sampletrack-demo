@@ -1,16 +1,25 @@
-# React + Vite
+# SampleTrack — Lab Storage Management Simulator
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+An interactive hospital lab sample storage management tool that demonstrates how queueing theory explains capacity bottlenecks in clinical sample retention.
 
-Currently, two official plugins are available:
+## Live Demo
+[sampletrack-demo.vercel.app](https://sampletrack-demo.vercel.app)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## The Problem
+Hospital labs store patient samples for up to 7 days for testing. But as bed counts grow while storage stays fixed, most samples get destroyed within 24–48 hours — before testing is complete.
 
-## React Compiler
+## What This Tool Does
+SampleTrack simulates a hospital lab's storage system and uses queueing theory to explain why the system breaks and what interventions fix it:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Little's Law** reveals that samples spend 93% of their time waiting, not being processed
+- **Kingman's VUT equation** shows that high utilization (>80%) causes exponential queue growth
+- **Scenario comparison** quantifies the impact of adding capacity vs reducing variability vs both
 
-## Expanding the ESLint configuration
+## Tech Stack
+- React + Vite
+- Single-page application — all simulation logic runs client-side
+- No backend or database required
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Built For
+MBA 8240 Operations & Supply Chain Management
+University of Iowa, Tippie College of Business
