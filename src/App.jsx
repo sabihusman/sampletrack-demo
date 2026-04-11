@@ -1202,14 +1202,22 @@ export default function App() {
             <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = λW)</h3>
             <div className="space-y-2">
               {[
-                { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9 },
+                { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9, tooltip: "ρ measures throughput utilization (arrival rate ÷ processing rate), not current slot occupancy. The system can show low inventory at a snapshot in time while still running at high throughput utilization — because samples are flowing in and out rapidly, even if few are stored at any given moment." },
                 { label: "L (avg in system)", value: L },
                 { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
                 { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
                 { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${Wq.toFixed(1)} hrs` },
               ].map(row => (
                 <div key={row.label} className="flex justify-between py-1.5 border-b" style={{ borderColor: COLORS.border }}>
-                  <span className="text-xs" style={{ color: COLORS.darkGray }}>{row.label}</span>
+                  <span className="text-xs flex items-center gap-1" style={{ color: COLORS.darkGray }}>
+                    {row.label}
+                    {row.tooltip && (
+                      <span className="rho-tooltip-wrap">
+                        <span className="rho-info-icon">i</span>
+                        <span className="rho-tooltip">{row.tooltip}</span>
+                      </span>
+                    )}
+                  </span>
                   <span className="text-xs font-mono font-bold" style={{ color: row.warn ? COLORS.red : COLORS.text }}>{row.value}</span>
                 </div>
               ))}
