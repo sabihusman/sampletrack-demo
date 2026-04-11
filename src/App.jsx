@@ -1146,6 +1146,15 @@ export default function App() {
       .map(([name, count]) => ({ name, count, pct: ((count / Math.max(destroyedSamples.length, 1)) * 100).toFixed(1) }));
 
     const inputCls = "w-20 px-2 py-1 rounded border text-xs font-mono text-center outline-none focus:ring-1 focus:ring-blue-400";
+    const explainStyle = { color: COLORS.darkGray, fontSize: 13, lineHeight: 1.6, marginTop: 10 };
+
+    // VUT factors for Kingman explanation
+    const V = (ca2 + effectiveCs2) / 2;
+    const U = rho > 0 && rho < 1 ? rho / (1 - rho) : 999;
+    const T = 1 / effectiveMu;
+    const Tp = T * 60; // process time in minutes
+    const rhoPct = (rho * 100).toFixed(1);
+    const waitPct = W > 0 ? ((Wq / W) * 100).toFixed(0) : "0";
 
     return (
       <div className="tab-content space-y-5">
@@ -1179,6 +1188,13 @@ export default function App() {
                 onChange={e => setAnalyticsParams(prev => ({ ...prev, staffMultiplier: Math.min(1.0, Math.max(0.5, parseFloat(e.target.value) || 0.5)) }))} />
             </div>
           </div>
+          <p style={explainStyle}>
+            {rho >= 0.95
+              ? `The lab is receiving ${lambda.toFixed(1)} samples per hour but can only process ${effectiveMu.toFixed(1)} per hour. That puts utilization at ${rhoPct}% \u2014 deep in the danger zone. At this level, the system has almost no slack to absorb normal variation in arrivals or processing times. Even small surges will cause samples to queue up and burn through their retention windows.`
+              : rho >= 0.80
+              ? `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system is approaching the critical threshold. It can still absorb minor variation, but any increase in arrivals or decrease in staffing will push it into the danger zone.`
+              : `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system has healthy slack capacity. Arrival surges and processing inconsistencies can be absorbed without significant queue buildup.`}
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -1198,6 +1214,11 @@ export default function App() {
                 </div>
               ))}
             </div>
+            <p style={explainStyle}>
+              {`Right now, there are approximately ${L} samples in the system at any given time. Each sample spends an average of ${W.toFixed(1)} hours from deposit to processing \u2014 but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "\u221E" : Wq.toFixed(1)} hours (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
+              {W > 6 ? ` A ${W.toFixed(1)}-hour average cycle time is critical \u2014 routine samples with 48-hour retention windows are losing ${((W / 48) * 100).toFixed(1)}% of their usable life just sitting in queue.` : ""}
+              {W <= 2 ? ` At ${W.toFixed(1)} hours, the system is cycling samples efficiently. Most retention windows have ample remaining time for testing.` : ""}
+            </p>
           </div>
 
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
@@ -1211,6 +1232,10 @@ export default function App() {
               </div>
               <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
             </div>
+            <p style={explainStyle}>
+              {`Queue wait time is driven by three multiplied factors. Variability (V = ${V.toFixed(1)}) captures how irregular arrivals and processing are \u2014 ${V > 1.05 ? "your system is more erratic than a purely random process" : V < 0.95 ? "your system is more consistent than random, which helps" : "about average randomness"}. Utilization (U = ${U > 900 ? "\u221E" : U.toFixed(1)}\u00D7) is the amplifier \u2014 ${U > 10 ? `at ${U.toFixed(1)}\u00D7, this is the dominant problem; the system is so full that every bit of variability gets massively amplified` : U > 3 ? `at ${U.toFixed(1)}\u00D7, utilization is significantly amplifying delays` : `at ${U.toFixed(1)}\u00D7, utilization is manageable`}. Process time (T = ${Tp.toFixed(1)} min) is the baseline speed, which is fixed by the equipment.`}
+              {U > 10 ? ` The utilization factor alone is multiplying every delay by ${U.toFixed(1)}\u00D7. This is why adding capacity (lowering \u03C1) has such a dramatic effect \u2014 it attacks the largest multiplier in the equation.` : ""}
+            </p>
           </div>
         </div>
 
@@ -1228,6 +1253,13 @@ export default function App() {
               <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
+          <p style={explainStyle}>
+            {rho >= 0.90
+              ? `The lab's current operating point is at ${rhoPct}% utilization \u2014 squarely on the vertical part of the curve. At this position, reducing utilization by just 5\u20138 percentage points would move the operating point back onto the flat part of the curve, cutting queue times dramatically. This is not a linear improvement \u2014 it's an exponential one.`
+              : rho >= 0.80
+              ? `The operating point at ${rhoPct}% shows the lab approaching the inflection point where the curve starts bending sharply upward. A few more percentage points of utilization and queue times will begin escalating rapidly. This is the last window for preventive action before the system degrades.`
+              : `The operating point at ${rhoPct}% sits on the flat part of the curve. Queue times are stable and predictable at this utilization level. The system can absorb moderate surges without cascading delays.`}
+          </p>
         </div>
 
         <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
@@ -1260,6 +1292,20 @@ export default function App() {
               ))}
             </tbody>
           </table>
+          <p style={explainStyle}>
+            {(() => {
+              const cur = scenarioData[0];
+              const rack = scenarioData[1];
+              const auto = scenarioData[2];
+              const both = scenarioData[3];
+              const curTqMin = (parseFloat(cur.tq) * 60).toFixed(0);
+              const rackTqMin = (parseFloat(rack.tq) * 60).toFixed(0);
+              const autoTqMin = (parseFloat(auto.tq) * 60).toFixed(0);
+              const bothTqMin = (parseFloat(both.tq) * 60).toFixed(0);
+              const improvement = curTqMin > 0 ? (((curTqMin - rackTqMin) / curTqMin) * 100).toFixed(0) : "0";
+              return `The current state shows ${curTqMin} minutes of queue wait with approximately ${cur.retMet}% retention compliance. Adding one in-department rack increases capacity to 960 slots, dropping \u03C1 to ${(rack.rho * 100).toFixed(0)}% and cutting queue wait to ${rackTqMin} minutes \u2014 a ${improvement}% improvement. Automated retrieval keeps the same capacity but reduces processing variability from ${effectiveCs2.toFixed(1)} to ${autoCs2.toFixed(1)}, lowering queue wait to ${autoTqMin} minutes. Combining both interventions achieves ${(both.rho * 100).toFixed(0)}% utilization with ${bothTqMin} minutes of queue wait and an estimated ${both.retMet}% retention compliance \u2014 the strongest outcome at relatively modest cost.`;
+            })()}
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
