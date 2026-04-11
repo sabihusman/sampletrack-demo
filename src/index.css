@@ -1,0 +1,95 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  background: #f0f4f8;
+  color: #1e293b;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+.font-mono {
+  font-family: 'DM Mono', monospace !important;
+}
+
+/* Sidebar dot-grid texture */
+.dot-grid {
+  background-image: radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+/* Utilization arc */
+.util-arc {
+  transition: stroke-dashoffset 0.6s ease;
+}
+
+/* Badge styles */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: 'DM Sans', sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+/* Table row hover */
+.sample-row:hover {
+  background: #f8fafc;
+}
+
+/* Capacity bar animation */
+.cap-bar-fill {
+  transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+/* Alert card pulse for final-call */
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+.pulse-red {
+  animation: pulse-red 2s infinite;
+}
+
+/* Toast animation */
+@keyframes slide-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.toast-enter {
+  animation: slide-in 0.3s ease-out;
+}
+
+/* Smooth tab transitions */
+.tab-content {
+  animation: fade-in 0.2s ease;
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
