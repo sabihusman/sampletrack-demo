@@ -1091,11 +1091,12 @@ export default function App() {
     const effectiveMu = mu * staffMultiplier;
     const effectiveCs2 = Math.min(2.0, cs2 + Math.max(0, (1.0 - staffMultiplier) / 0.1) * 0.15);
     const rho = lambda / effectiveMu;
-    const L = activeSamples.length;
-    const W = L / lambda;
-    const Lq = rho > 0 && rho < 1 ? (rho * rho) / (1 - rho) : 999;
-    const Wq = Lq / lambda;
     const Tq = rho > 0 && rho < 1 ? ((ca2 + effectiveCs2) / 2) * (rho / (1 - rho)) * (1 / effectiveMu) : 999;
+    const serviceTime = 1 / effectiveMu; // hours per sample
+    const W = Tq < 900 ? Tq + serviceTime : 999; // avg time in system (queue + processing)
+    const L = W < 900 ? lambda * W : 999; // avg samples in system (Little's Law)
+    const Lq = rho > 0 && rho < 1 ? (rho * rho) / (1 - rho) : 999;
+    const Wq = Tq; // queue wait = Tq
 
     const sensitivityData = [];
     for (let r = 0.5; r <= 0.99; r += 0.02) {
@@ -1104,19 +1105,24 @@ export default function App() {
     }
 
     const autoCs2 = 0.4;
+    // Scenarios derive from current parameters — +1 Rack increases μ by ~15%, Automated Retrieval cuts Cs²
+    const rackMu = effectiveMu * 1.15; // 960 slots = ~15% more throughput capacity
+    const rhoRack = lambda / rackMu;
+    const rhoBoth = lambda / rackMu;
     const scenarios = [
-      { name: "Current State", rho: 0.95, cs2Used: effectiveCs2, desc: "As-is operations" },
-      { name: "+1 Rack In-Dept", rho: 0.87, cs2Used: effectiveCs2, desc: "960 slot capacity" },
-      { name: "Automated Retrieval", rho: 0.95, cs2Used: autoCs2, desc: "Reduced service variability" },
-      { name: "Both Interventions", rho: 0.87, cs2Used: autoCs2, desc: "Expanded + automated" },
-      { name: "Smart Queue Policy", rho: 0.95, cs2Used: effectiveCs2, desc: "Routine-first destruction — no capital cost" },
-      { name: "Expiry Sweep", rho: 0.95, cs2Used: effectiveCs2, desc: "Proactive expired sample clearance — μ×1.05", muOverride: effectiveMu * 1.05 },
+      { name: "Current State", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "As-is operations" },
+      { name: "+1 Rack In-Dept", rho: rhoRack, cs2Used: effectiveCs2, muUsed: rackMu, desc: "960 slot capacity" },
+      { name: "Automated Retrieval", rho: rho, cs2Used: autoCs2, muUsed: effectiveMu, desc: "Reduced service variability" },
+      { name: "Both Interventions", rho: rhoBoth, cs2Used: autoCs2, muUsed: rackMu, desc: "Expanded + automated" },
+      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Routine-first destruction — no capital cost" },
+      { name: "Expiry Sweep", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu * 1.05, desc: "Proactive expired sample clearance — μ×1.05" },
     ];
     const scenarioData = scenarios.map(s => {
-      const muForScenario = s.muOverride || effectiveMu;
-      const tq = ((ca2 + s.cs2Used) / 2) * (s.rho / (1 - s.rho)) * (1 / muForScenario);
+      const tq = s.rho > 0 && s.rho < 1
+        ? ((ca2 + s.cs2Used) / 2) * (s.rho / (1 - s.rho)) * (1 / s.muUsed)
+        : 999;
       const retMet = Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
-      return { ...s, tq: tq.toFixed(1), retMet: retMet.toFixed(0) };
+      return { ...s, tq: tq < 900 ? tq.toFixed(1) : "∞", retMet: retMet.toFixed(0) };
     });
 
     const capPressureCount = destroyedSamples.filter(s => s.destructionReason === "capacity-pressure").length;
@@ -1203,7 +1209,7 @@ export default function App() {
             <div className="space-y-2">
               {[
                 { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9, tooltip: "ρ measures throughput utilization (arrival rate ÷ processing rate), not current slot occupancy. The system can show low inventory at a snapshot in time while still running at high throughput utilization — because samples are flowing in and out rapidly, even if few are stored at any given moment." },
-                { label: "L (avg in system)", value: L },
+                { label: "L (avg in system)", value: L > 900 ? "∞" : L.toFixed(1) },
                 { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
                 { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
                 { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${Wq.toFixed(1)} hrs` },
@@ -1289,7 +1295,7 @@ export default function App() {
                   backgroundColor: i === 5 ? COLORS.green + "06" : i === 4 ? COLORS.accent + "08" : i === 0 ? COLORS.red + "05" : i === 3 ? COLORS.green + "08" : undefined,
                 }}>
                   <td className="px-3 py-2 font-medium">{s.name}</td>
-                  <td className="px-3 py-2 text-center font-mono">{s.rho}</td>
+                  <td className="px-3 py-2 text-center font-mono">{typeof s.rho === "number" ? s.rho.toFixed(2) : s.rho}</td>
                   <td className="px-3 py-2 text-center font-mono font-bold"
                     style={{ color: parseFloat(s.tq) > 3 ? COLORS.red : COLORS.green }}>{s.tq}</td>
                   <td className="px-3 py-2 text-center">
