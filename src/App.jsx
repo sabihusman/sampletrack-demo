@@ -199,6 +199,8 @@ function formatDateShort(d) {
     "  " + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+function badgeCount(n) { return n > 99 ? "99+" : String(n); }
+
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 function StatCard({ icon: Icon, label, value, sub, color }) {
   return (
@@ -424,6 +426,10 @@ export default function App() {
       const inDeptAfterSweep = prevSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
       const pastDeadline = [];
 
+      // Track tier crossings: red = per-sample, orange/yellow = aggregated per-department
+      const orangeByDept = {};
+      const yellowByDept = {};
+
       prevSamples.forEach(s => {
         if (updatedMap[s.id]) return; // already swept or was already destroyed
         const newRetention = getRetentionHours(s.priority, inDeptAfterSweep);
@@ -435,6 +441,7 @@ export default function App() {
           pastDeadline.push({ ...s, retentionHours: newRetention });
         } else {
           if (prevPct < 100 && newPct >= 100) {
+            // Red tier — keep per-sample (critical, needs individual physician page)
             newNotifs.push({
               type: "final-call", tier: "red",
               sampleId: s.id, patientId: s.patientId,
@@ -444,26 +451,38 @@ export default function App() {
               channel: "page",
             });
           } else if (prevPct < 75 && newPct >= 75) {
-            newNotifs.push({
-              type: "urgent-alert", tier: "orange",
-              sampleId: s.id, patientId: s.patientId,
-              physician: s.physician, department: s.department,
-              deptLabel: DEPT_LABELS[s.department],
-              message: `URGENT: ${s.id} (${s.patientId}) at ${newPct.toFixed(0)}% retention — sent to ${s.physician} via Epic Beaker inbox.`,
-              channel: "epic-inbox",
-            });
+            // Orange tier — aggregate by department
+            const dl = DEPT_LABELS[s.department];
+            orangeByDept[dl] = (orangeByDept[dl] || 0) + 1;
           } else if (prevPct < 50 && newPct >= 50) {
-            newNotifs.push({
-              type: "scheduled-alert", tier: "yellow",
-              sampleId: s.id, patientId: s.patientId,
-              physician: s.physician, department: s.department,
-              deptLabel: DEPT_LABELS[s.department],
-              message: `REMINDER: ${s.id} (${s.patientId}) at 50% retention — ${DEPT_LABELS[s.department]} dept dashboard updated.`,
-              channel: "dashboard",
-            });
+            // Yellow tier — aggregate by department
+            const dl = DEPT_LABELS[s.department];
+            yellowByDept[dl] = (yellowByDept[dl] || 0) + 1;
           }
           updatedMap[s.id] = { ...s, retentionHours: newRetention };
         }
+      });
+
+      // Emit aggregated orange notifications (one per department)
+      Object.entries(orangeByDept).forEach(([dept, count]) => {
+        newNotifs.push({
+          type: "urgent-alert", tier: "orange",
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `URGENT: ${count} sample(s) in ${dept} crossed 75% retention — physicians notified via Epic Beaker inbox.`,
+          channel: "epic-inbox",
+        });
+      });
+
+      // Emit aggregated yellow notifications (one per department)
+      Object.entries(yellowByDept).forEach(([dept, count]) => {
+        newNotifs.push({
+          type: "scheduled-alert", tier: "yellow",
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `REMINDER: ${count} sample(s) in ${dept} at 50% retention — department dashboard updated.`,
+          channel: "dashboard",
+        });
       });
 
       // Sort past-deadline: routine first (oldest depositTime first), then urgent, then stat
@@ -476,16 +495,24 @@ export default function App() {
       });
 
       // Mark capacity-pressure destructions in sorted order
+      const destroyedByDept = {};
       pastDeadline.forEach(s => {
+        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
+        const dl = DEPT_LABELS[s.department];
+        if (!destroyedByDept[dl]) destroyedByDept[dl] = { count: 0, testsLost: 0 };
+        destroyedByDept[dl].count++;
+        destroyedByDept[dl].testsLost += s.pendingTests.length;
+      });
+
+      // Emit aggregated destruction notifications (one per department)
+      Object.entries(destroyedByDept).forEach(([dept, { count, testsLost }]) => {
         newNotifs.push({
           type: "destruction", tier: "red",
-          sampleId: s.id, patientId: s.patientId,
-          physician: s.physician, department: s.department,
-          deptLabel: DEPT_LABELS[s.department],
-          message: `DESTROYED: ${s.id} (${s.patientId}) — ${s.pendingTests.length} test(s) lost. ${s.physician} and ${DEPT_LABELS[s.department]} dept notified.`,
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `DESTROYED: ${count} sample(s) in ${dept} — ${testsLost} test(s) lost. Department and physicians notified.`,
           channel: "page + epic-inbox",
         });
-        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
       });
 
       const updated = prevSamples.map(s => updatedMap[s.id] || s);
@@ -499,7 +526,7 @@ export default function App() {
             const stamped = newNotifs.map((n, i) => ({
               ...n, id: prevId + i, time: futureNow, read: false,
             }));
-            setNotifications(prev => [...stamped, ...prev].slice(0, 500));
+            setNotifications(prev => [...stamped, ...prev].slice(0, 200));
             return prevId + newNotifs.length;
           });
         }, 0);
@@ -1599,13 +1626,13 @@ export default function App() {
                 {tab.id === "alerts" && (alertCounts.red + alertCounts.orange + alertCounts.yellow) > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.red, color: "white" }}>
-                    {alertCounts.red + alertCounts.orange + alertCounts.yellow}
+                    {badgeCount(alertCounts.red + alertCounts.orange + alertCounts.yellow)}
                   </span>
                 )}
                 {tab.id === "notifications" && notifications.filter(n => !n.read).length > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.accent, color: "white" }}>
-                    {notifications.filter(n => !n.read).length}
+                    {badgeCount(notifications.filter(n => !n.read).length)}
                   </span>
                 )}
               </button>
