@@ -407,11 +407,63 @@ export default function App() {
       const newNotifs = [];
       const updatedMap = {};
 
+      // ── PHASE 0: Generate new sample arrivals for the 6-hour window ────
+      // At λ ≈ 52.5 samples/hr, 6 hours produces ~315 samples.
+      // Use a deterministic PRNG seeded from clock offset for reproducibility.
+      const arrivalRng = mulberry32(1000 + clockOffset);
+      const arrivalsCount = Math.round(52.5 * 6); // 315 samples per 6h cycle
+      const newArrivals = [];
+      const existingIds = new Set(prevSamples.map(s => s.id));
+      let autoId = prevSamples.length + 3000;
+
+      for (let i = 0; i < arrivalsCount; i++) {
+        // Generate unique ID
+        let id;
+        do {
+          id = `SMP-${String(autoId++).padStart(4, "0")}`;
+        } while (existingIds.has(id));
+        existingIds.add(id);
+
+        const type = weightedPick(arrivalRng, TYPES, TYPE_WEIGHTS);
+        const dept = weightedPick(arrivalRng, DEPARTMENTS, DEPT_WEIGHTS);
+        const priority = weightedPick(arrivalRng, PRIORITIES, PRIORITY_WEIGHTS);
+        const physician = PHYSICIANS[Math.floor(arrivalRng() * PHYSICIANS.length)];
+        // Deposit time spread across the 6-hour window
+        const depositTime = new Date(prevNow.getTime() + arrivalRng() * 6 * 3600000);
+        const retentionHours = RETENTION_BASE[priority];
+        const availableTests = TEST_MENU[type] || TEST_MENU.other;
+        const numTests = 1 + Math.floor(arrivalRng() * Math.min(3, availableTests.length));
+        const shuffled = [...availableTests].sort(() => arrivalRng() - 0.5);
+        const pendingTests = shuffled.slice(0, numTests);
+        const scanError = arrivalRng() < 0.05;
+        const patientId = `PT-${String(10000 + Math.floor(arrivalRng() * 89999)).padStart(5, "0")}`;
+
+        // Assign to in-dept or central based on current occupancy
+        const currentInDept = prevSamples.filter(x => !x.destroyed && x.location === "in-department").length + newArrivals.filter(x => x.location === "in-department").length;
+        const location = currentInDept < IN_DEPT_CAPACITY ? "in-department" : "central-storage";
+        const rackNum = location === "in-department"
+          ? Math.floor(arrivalRng() * IN_DEPT_RACKS) + 1
+          : IN_DEPT_RACKS + Math.floor(arrivalRng() * CENTRAL_RACKS) + 1;
+        const rackId = `RACK-${String(rackNum).padStart(2, "0")}`;
+        const rackPosition = Math.floor(arrivalRng() * RACK_CAPACITY) + 1;
+
+        newArrivals.push({
+          id, patientId, rackId, rackPosition, scanError,
+          type, department: dept, physician, pendingTests,
+          priority, depositTime, retentionHours, location,
+          status: "active", destroyed: false, destroyedAt: null,
+          destructionReason: null, extensionCount: 0,
+        });
+      }
+
+      // Merge new arrivals into the sample set
+      const allSamples = [...prevSamples, ...newArrivals];
+
       // ── PHASE 1: Expiry Sweep ──────────────────────────────────────────
       // Destroy samples that exceeded their FULL (un-shortened) base retention.
       // This runs BEFORE capacity-pressure logic so freed slots reduce utilization.
       let swept = 0;
-      prevSamples.forEach(s => {
+      allSamples.forEach(s => {
         if (s.destroyed) { updatedMap[s.id] = s; return; }
         const baseRetention = RETENTION_BASE[s.priority];
         const elapsed = (futureNow - s.depositTime) / 3600000;
@@ -423,14 +475,14 @@ export default function App() {
 
       // ── PHASE 2: Capacity-pressure retention overrides + alert tier crossings ──
       // Recalculate in-dept count AFTER expiry sweep
-      const inDeptAfterSweep = prevSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
+      const inDeptAfterSweep = allSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
       const pastDeadline = [];
 
       // Track tier crossings: red = per-sample, orange/yellow = aggregated per-department
       const orangeByDept = {};
       const yellowByDept = {};
 
-      prevSamples.forEach(s => {
+      allSamples.forEach(s => {
         if (updatedMap[s.id]) return; // already swept or was already destroyed
         const newRetention = getRetentionHours(s.priority, inDeptAfterSweep);
         const deadline = new Date(s.depositTime.getTime() + newRetention * 3600000);
@@ -515,7 +567,11 @@ export default function App() {
         });
       });
 
-      const updated = prevSamples.map(s => updatedMap[s.id] || s);
+      const updated = allSamples.map(s => updatedMap[s.id] || s);
+
+      // Log cycle stats for debugging
+      const activeRemaining = updated.filter(s => !s.destroyed).length;
+      console.log(`[+6h] Arrivals: ${arrivalsCount} | Swept (expiry): ${swept} | Capacity-pressure: ${pastDeadline.length} | Active remaining: ${activeRemaining}`);
 
       // Update sweep count for dashboard display
       setTimeout(() => setSweepCount(swept), 0);
