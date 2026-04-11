@@ -1184,18 +1184,23 @@ export default function App() {
               </div>
               <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
             </div>
-            <ResponsiveContainer width="100%" height={160}>
-              <LineChart data={sensitivityData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                <XAxis dataKey="rho" tick={{ fontSize: 10 }}
-                  label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 10 }}
-                  label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 10 }} />
-                <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
-                <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
           </div>
+        </div>
+
+        {/* Sensitivity curve — full-width for presentation readability */}
+        <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Sensitivity: Queue Wait Time vs Utilization</h3>
+          <ResponsiveContainer width="100%" height={350}>
+            <LineChart data={sensitivityData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+              <XAxis dataKey="rho" tick={{ fontSize: 12 }}
+                label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 12 }}
+                label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 12 }} />
+              <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
+              <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
         </div>
 
         <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
