@@ -1111,7 +1111,7 @@ export default function App() {
 
     const falloutByDeptType = {};
     destroyedSamples.forEach(s => {
-      const key = `${DEPT_LABELS[s.department]} \u2014 ${s.type}`;
+      const key = `${DEPT_LABELS[s.department]} — ${s.type}`;
       falloutByDeptType[key] = (falloutByDeptType[key] || 0) + 1;
     });
     const highFallout = Object.entries(falloutByDeptType)
@@ -1128,10 +1128,10 @@ export default function App() {
           </h3>
           <div className="flex flex-wrap items-center gap-5">
             {[
-              { label: "\u03BB (arrival rate)", key: "lambda", unit: "samples/hr" },
-              { label: "\u03BC (service rate)", key: "mu", unit: "samples/hr" },
-              { label: "C\u2090\u00B2 (arrival CV\u00B2)", key: "ca2", unit: "" },
-              { label: "C\u209B\u00B2 (service CV\u00B2)", key: "cs2", unit: "" },
+              { label: "λ (arrival rate)", key: "lambda", unit: "samples/hr" },
+              { label: "μ (service rate)", key: "mu", unit: "samples/hr" },
+              { label: "Cₐ² (arrival CV²)", key: "ca2", unit: "" },
+              { label: "Cₛ² (service CV²)", key: "cs2", unit: "" },
             ].map(p => (
               <div key={p.key} className="flex items-center gap-2">
                 <span className="text-xs font-medium" style={{ color: COLORS.darkGray }}>{p.label}</span>
@@ -1156,14 +1156,14 @@ export default function App() {
 
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
-            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = \u03BBW)</h3>
+            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = λW)</h3>
             <div className="space-y-2">
               {[
-                { label: "\u03C1 (utilization)", value: rho.toFixed(3), warn: rho > 0.9 },
+                { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9 },
                 { label: "L (avg in system)", value: L },
                 { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
-                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "\u221E" : Lq.toFixed(1) },
-                { label: "Wq (avg wait time)", value: Wq > 900 ? "\u221E" : `${Wq.toFixed(1)} hrs` },
+                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
+                { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${Wq.toFixed(1)} hrs` },
               ].map(row => (
                 <div key={row.label} className="flex justify-between py-1.5 border-b" style={{ borderColor: COLORS.border }}>
                   <span className="text-xs" style={{ color: COLORS.darkGray }}>{row.label}</span>
@@ -1176,11 +1176,11 @@ export default function App() {
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
             <h3 className="text-sm font-semibold mb-2" style={{ color: COLORS.text }}>Kingman's Equation (VUT)</h3>
             <div className="text-xs font-mono mb-1 px-3 py-2 rounded" style={{ backgroundColor: "#F8FAFC", color: COLORS.darkGray }}>
-              Tq = (C\u2090\u00B2 + C\u209B\u00B2)/2 \u00D7 \u03C1/(1-\u03C1) \u00D7 1/\u03BC
+              Tq = (Cₐ² + Cₛ²)/2 × ρ/(1−ρ) × 1/μ
             </div>
             <div className="text-center py-3">
               <div className="text-3xl font-bold font-mono" style={{ color: Tq > 2 ? COLORS.red : COLORS.accent }}>
-                {Tq > 900 ? "\u221E" : Tq.toFixed(2)}
+                {Tq > 900 ? "∞" : Tq.toFixed(2)}
               </div>
               <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
             </div>
@@ -1188,7 +1188,7 @@ export default function App() {
               <LineChart data={sensitivityData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
                 <XAxis dataKey="rho" tick={{ fontSize: 10 }}
-                  label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 10 }} />
+                  label={{ value: "ρ (utilization)", position: "insideBottom", offset: -2, fontSize: 10 }} />
                 <YAxis tick={{ fontSize: 10 }}
                   label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 10 }} />
                 <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
@@ -1204,7 +1204,7 @@ export default function App() {
             <thead>
               <tr className="border-b" style={{ borderColor: COLORS.border, backgroundColor: "#F8FAFC" }}>
                 <th className="px-3 py-2 text-left font-semibold">Scenario</th>
-                <th className="px-3 py-2 text-center font-semibold">{"\u03C1"}</th>
+                <th className="px-3 py-2 text-center font-semibold">ρ</th>
                 <th className="px-3 py-2 text-center font-semibold">Tq (hrs)</th>
                 <th className="px-3 py-2 text-center font-semibold">Est. Retention Met</th>
                 <th className="px-3 py-2 text-left font-semibold">Notes</th>
@@ -1248,7 +1248,7 @@ export default function App() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b" style={{ borderColor: COLORS.border }}>
-                  <th className="py-1.5 text-left font-semibold">Dept \u2014 Type</th>
+                  <th className="py-1.5 text-left font-semibold">Dept — Type</th>
                   <th className="py-1.5 text-center font-semibold">Count</th>
                   <th className="py-1.5 text-center font-semibold">%</th>
                 </tr>
