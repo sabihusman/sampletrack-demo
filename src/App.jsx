@@ -1158,11 +1158,11 @@ export default function App() {
     let sensitivityMax = 0;
     for (let r = 0.5; r <= 0.99; r += 0.02) {
       const tq = ((ca2 + effectiveCs2) / 2) * (r / (1 - r)) * (1 / effectiveMu);
-      const val = parseFloat(tq.toFixed(2));
-      sensitivityData.push({ rho: r.toFixed(2), Tq: val });
-      if (val > sensitivityMax) sensitivityMax = val;
+      const valMin = parseFloat((tq * 60).toFixed(1)); // display in minutes
+      sensitivityData.push({ rho: r.toFixed(2), Tq: valMin });
+      if (valMin > sensitivityMax) sensitivityMax = valMin;
     }
-    const yAxisMax = Math.ceil(sensitivityMax * 1.15 * 10) / 10; // round up to nearest 0.1
+    const yAxisMax = Math.ceil(sensitivityMax * 1.15); // round up to nearest integer (minutes)
 
     const autoCs2 = 0.4;
     // Scenarios derive from current parameters — +1 Rack increases μ by ~15%, Automated Retrieval cuts Cs²
@@ -1184,7 +1184,8 @@ export default function App() {
       const retMet = s.retOverride != null
         ? s.retOverride
         : Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
-      return { ...s, tq: tq < 900 ? tq.toFixed(1) : "∞", retMet: typeof retMet === "number" ? retMet.toFixed(0) : retMet };
+      const tqMin = tq < 900 ? Math.round(tq * 60) : "∞";
+      return { ...s, tq: tqMin, retMet: typeof retMet === "number" ? retMet.toFixed(0) : retMet };
     });
 
     const capPressureCount = destroyedSamples.filter(s => s.destructionReason === "capacity-pressure").length;
@@ -1272,9 +1273,9 @@ export default function App() {
               {[
                 { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9, tooltip: "ρ measures throughput utilization (arrival rate ÷ processing rate), not current slot occupancy. The system can show low inventory at a snapshot in time while still running at high throughput utilization — because samples are flowing in and out rapidly, even if few are stored at any given moment." },
                 { label: "L (avg in system)", value: L > 900 ? "∞" : L.toFixed(1) },
-                { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
+                { label: "W (avg time in system)", value: W > 900 ? "∞" : `${(W * 60).toFixed(1)} min` },
                 { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
-                { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${Wq.toFixed(1)} hrs` },
+                { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${(Wq * 60).toFixed(1)} min` },
               ].map(row => (
                 <div key={row.label} className="flex justify-between py-1.5 border-b" style={{ borderColor: COLORS.border }}>
                   <span className="text-xs flex items-center gap-1" style={{ color: COLORS.darkGray }}>
@@ -1291,7 +1292,7 @@ export default function App() {
               ))}
             </div>
             <p style={explainStyle}>
-              {`Right now, there are approximately ${L > 900 ? "∞" : Math.round(L)} samples in the system at any given time. Each sample spends an average of ${W > 900 ? "∞" : W.toFixed(1)} hours from deposit to processing — but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "∞" : Wq.toFixed(1)} hours (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
+              {`Right now, there are approximately ${L > 900 ? "∞" : Math.round(L)} samples in the system at any given time. Each sample spends an average of ${W > 900 ? "∞" : (W * 60).toFixed(1)} minutes from deposit to processing — but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "∞" : (Wq * 60).toFixed(1)} minutes (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
               {rho >= 0.90 ? ` At ${rhoPct}% utilization, this is critical — routine samples with 48-hour retention windows are losing ${W > 900 ? "most" : ((W / 48) * 100).toFixed(1) + "%"} of their usable life just sitting in queue.` : ""}
               {rho >= 0.80 && rho < 0.90 ? ` At ${rhoPct}% utilization, the system is under pressure. Queue times will escalate rapidly if arrivals increase or staffing drops.` : ""}
               {rho < 0.80 ? ` At ${rhoPct}% utilization, the system is cycling samples efficiently. Most retention windows have ample remaining time for testing.` : ""}
@@ -1305,9 +1306,9 @@ export default function App() {
             </div>
             <div className="text-center py-3">
               <div className="text-3xl font-bold font-mono" style={{ color: Tq > 2 ? COLORS.red : COLORS.accent }}>
-                {Tq > 900 ? "∞" : Tq.toFixed(2)}
+                {Tq > 900 ? "∞" : (Tq * 60).toFixed(1)}
               </div>
-              <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
+              <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (minutes)</div>
             </div>
             <p style={explainStyle}>
               {`Queue wait time is driven by three multiplied factors. Variability (V = ${V.toFixed(1)}) captures how irregular arrivals and processing are \u2014 ${V > 1.05 ? "your system is more erratic than a purely random process" : V < 0.95 ? "your system is more consistent than random, which helps" : "about average randomness"}. Utilization (U = ${U > 900 ? "\u221E" : U.toFixed(1)}\u00D7) is the amplifier \u2014 ${U > 10 ? `at ${U.toFixed(1)}\u00D7, this is the dominant problem; the system is so full that every bit of variability gets massively amplified` : U > 3 ? `at ${U.toFixed(1)}\u00D7, utilization is significantly amplifying delays` : `at ${U.toFixed(1)}\u00D7, utilization is manageable`}. Process time (T = ${Tp.toFixed(1)} min) is the baseline speed, which is fixed by the equipment.`}
@@ -1325,8 +1326,8 @@ export default function App() {
               <XAxis dataKey="rho" tick={{ fontSize: 12 }}
                 label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 12 }} />
               <YAxis tick={{ fontSize: 12 }} domain={[0, yAxisMax]}
-                label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 12 }} />
-              <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
+                label={{ value: "Tq (min)", angle: -90, position: "insideLeft", fontSize: 12 }} />
+              <Tooltip formatter={(v) => [`${v} min`, "Tq"]} />
               <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -1346,7 +1347,7 @@ export default function App() {
               <tr className="border-b" style={{ borderColor: COLORS.border, backgroundColor: "#F8FAFC" }}>
                 <th className="px-3 py-2 text-left font-semibold">Scenario</th>
                 <th className="px-3 py-2 text-center font-semibold">ρ</th>
-                <th className="px-3 py-2 text-center font-semibold">Tq (hrs)</th>
+                <th className="px-3 py-2 text-center font-semibold">Tq (min)</th>
                 <th className="px-3 py-2 text-center font-semibold">Est. Retention Met</th>
                 <th className="px-3 py-2 text-left font-semibold">Notes</th>
               </tr>
@@ -1360,7 +1361,7 @@ export default function App() {
                   <td className="px-3 py-2 font-medium">{s.name}</td>
                   <td className="px-3 py-2 text-center font-mono">{typeof s.rho === "number" ? s.rho.toFixed(2) : s.rho}</td>
                   <td className="px-3 py-2 text-center font-mono font-bold"
-                    style={{ color: parseFloat(s.tq) > 3 ? COLORS.red : COLORS.green }}>{s.tq}</td>
+                    style={{ color: (typeof s.tq === "number" ? s.tq : 999) > 180 ? COLORS.red : COLORS.green }}>{s.tq}</td>
                   <td className="px-3 py-2 text-center">
                     <span className="font-mono font-bold" style={{ color: parseInt(s.retMet) > 70 ? COLORS.green : COLORS.red }}>{s.retMet}%</span>
                   </td>
@@ -1375,10 +1376,10 @@ export default function App() {
               const rack = scenarioData[1];
               const auto = scenarioData[2];
               const both = scenarioData[3];
-              const curTqMin = (parseFloat(cur.tq) * 60).toFixed(0);
-              const rackTqMin = (parseFloat(rack.tq) * 60).toFixed(0);
-              const autoTqMin = (parseFloat(auto.tq) * 60).toFixed(0);
-              const bothTqMin = (parseFloat(both.tq) * 60).toFixed(0);
+              const curTqMin = typeof cur.tq === "number" ? cur.tq : 0;
+              const rackTqMin = typeof rack.tq === "number" ? rack.tq : 0;
+              const autoTqMin = typeof auto.tq === "number" ? auto.tq : 0;
+              const bothTqMin = typeof both.tq === "number" ? both.tq : 0;
               const improvement = curTqMin > 0 ? (((curTqMin - rackTqMin) / curTqMin) * 100).toFixed(0) : "0";
               return `The current state shows ${curTqMin} minutes of queue wait with approximately ${cur.retMet}% retention compliance. Adding one in-department rack increases capacity to 960 slots, dropping \u03C1 to ${(rack.rho * 100).toFixed(0)}% and cutting queue wait to ${rackTqMin} minutes \u2014 a ${improvement}% improvement. Automated retrieval keeps the same capacity but reduces processing variability from ${effectiveCs2.toFixed(1)} to ${autoCs2.toFixed(1)}, lowering queue wait to ${autoTqMin} minutes. Combining both interventions achieves ${(both.rho * 100).toFixed(0)}% utilization with ${bothTqMin} minutes of queue wait and an estimated ${both.retMet}% retention compliance \u2014 the strongest outcome at relatively modest cost.`;
             })()}
