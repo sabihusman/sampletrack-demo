@@ -1099,10 +1099,14 @@ export default function App() {
     const Wq = Tq; // queue wait = Tq
 
     const sensitivityData = [];
+    let sensitivityMax = 0;
     for (let r = 0.5; r <= 0.99; r += 0.02) {
       const tq = ((ca2 + effectiveCs2) / 2) * (r / (1 - r)) * (1 / effectiveMu);
-      sensitivityData.push({ rho: r.toFixed(2), Tq: parseFloat(tq.toFixed(2)) });
+      const val = parseFloat(tq.toFixed(2));
+      sensitivityData.push({ rho: r.toFixed(2), Tq: val });
+      if (val > sensitivityMax) sensitivityMax = val;
     }
+    const yAxisMax = Math.ceil(sensitivityMax * 1.15 * 10) / 10; // round up to nearest 0.1
 
     const autoCs2 = 0.4;
     // Scenarios derive from current parameters — +1 Rack increases μ by ~15%, Automated Retrieval cuts Cs²
@@ -1114,15 +1118,17 @@ export default function App() {
       { name: "+1 Rack In-Dept", rho: rhoRack, cs2Used: effectiveCs2, muUsed: rackMu, desc: "960 slot capacity" },
       { name: "Automated Retrieval", rho: rho, cs2Used: autoCs2, muUsed: effectiveMu, desc: "Reduced service variability" },
       { name: "Both Interventions", rho: rhoBoth, cs2Used: autoCs2, muUsed: rackMu, desc: "Expanded + automated" },
-      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Routine-first destruction — no capital cost" },
-      { name: "Expiry Sweep", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu * 1.05, desc: "Proactive expired sample clearance — μ×1.05" },
+      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Routine-first destruction — no capital cost", retOverride: 87 },
+      { name: "Expiry Sweep", rho: lambda / (effectiveMu * 1.05), cs2Used: effectiveCs2, muUsed: effectiveMu * 1.05, desc: "Proactive expired sample clearance — μ×1.05" },
     ];
     const scenarioData = scenarios.map(s => {
       const tq = s.rho > 0 && s.rho < 1
         ? ((ca2 + s.cs2Used) / 2) * (s.rho / (1 - s.rho)) * (1 / s.muUsed)
         : 999;
-      const retMet = Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
-      return { ...s, tq: tq < 900 ? tq.toFixed(1) : "∞", retMet: retMet.toFixed(0) };
+      const retMet = s.retOverride != null
+        ? s.retOverride
+        : Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
+      return { ...s, tq: tq < 900 ? tq.toFixed(1) : "∞", retMet: typeof retMet === "number" ? retMet.toFixed(0) : retMet };
     });
 
     const capPressureCount = destroyedSamples.filter(s => s.destructionReason === "capacity-pressure").length;
@@ -1229,9 +1235,10 @@ export default function App() {
               ))}
             </div>
             <p style={explainStyle}>
-              {`Right now, there are approximately ${L} samples in the system at any given time. Each sample spends an average of ${W.toFixed(1)} hours from deposit to processing \u2014 but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "\u221E" : Wq.toFixed(1)} hours (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
-              {W > 6 ? ` A ${W.toFixed(1)}-hour average cycle time is critical \u2014 routine samples with 48-hour retention windows are losing ${((W / 48) * 100).toFixed(1)}% of their usable life just sitting in queue.` : ""}
-              {W <= 2 ? ` At ${W.toFixed(1)} hours, the system is cycling samples efficiently. Most retention windows have ample remaining time for testing.` : ""}
+              {`Right now, there are approximately ${L > 900 ? "∞" : Math.round(L)} samples in the system at any given time. Each sample spends an average of ${W > 900 ? "∞" : W.toFixed(1)} hours from deposit to processing — but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "∞" : Wq.toFixed(1)} hours (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
+              {rho >= 0.90 ? ` At ${rhoPct}% utilization, this is critical — routine samples with 48-hour retention windows are losing ${W > 900 ? "most" : ((W / 48) * 100).toFixed(1) + "%"} of their usable life just sitting in queue.` : ""}
+              {rho >= 0.80 && rho < 0.90 ? ` At ${rhoPct}% utilization, the system is under pressure. Queue times will escalate rapidly if arrivals increase or staffing drops.` : ""}
+              {rho < 0.80 ? ` At ${rhoPct}% utilization, the system is cycling samples efficiently. Most retention windows have ample remaining time for testing.` : ""}
             </p>
           </div>
 
@@ -1261,7 +1268,7 @@ export default function App() {
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
               <XAxis dataKey="rho" tick={{ fontSize: 12 }}
                 label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 12 }} />
-              <YAxis tick={{ fontSize: 12 }}
+              <YAxis tick={{ fontSize: 12 }} domain={[0, yAxisMax]}
                 label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 12 }} />
               <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
               <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
