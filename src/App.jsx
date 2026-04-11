@@ -199,6 +199,8 @@ function formatDateShort(d) {
     "  " + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+function badgeCount(n) { return n > 99 ? "99+" : String(n); }
+
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 function StatCard({ icon: Icon, label, value, sub, color }) {
   return (
@@ -424,6 +426,10 @@ export default function App() {
       const inDeptAfterSweep = prevSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
       const pastDeadline = [];
 
+      // Track tier crossings: red = per-sample, orange/yellow = aggregated per-department
+      const orangeByDept = {};
+      const yellowByDept = {};
+
       prevSamples.forEach(s => {
         if (updatedMap[s.id]) return; // already swept or was already destroyed
         const newRetention = getRetentionHours(s.priority, inDeptAfterSweep);
@@ -435,6 +441,7 @@ export default function App() {
           pastDeadline.push({ ...s, retentionHours: newRetention });
         } else {
           if (prevPct < 100 && newPct >= 100) {
+            // Red tier — keep per-sample (critical, needs individual physician page)
             newNotifs.push({
               type: "final-call", tier: "red",
               sampleId: s.id, patientId: s.patientId,
@@ -444,26 +451,38 @@ export default function App() {
               channel: "page",
             });
           } else if (prevPct < 75 && newPct >= 75) {
-            newNotifs.push({
-              type: "urgent-alert", tier: "orange",
-              sampleId: s.id, patientId: s.patientId,
-              physician: s.physician, department: s.department,
-              deptLabel: DEPT_LABELS[s.department],
-              message: `URGENT: ${s.id} (${s.patientId}) at ${newPct.toFixed(0)}% retention — sent to ${s.physician} via Epic Beaker inbox.`,
-              channel: "epic-inbox",
-            });
+            // Orange tier — aggregate by department
+            const dl = DEPT_LABELS[s.department];
+            orangeByDept[dl] = (orangeByDept[dl] || 0) + 1;
           } else if (prevPct < 50 && newPct >= 50) {
-            newNotifs.push({
-              type: "scheduled-alert", tier: "yellow",
-              sampleId: s.id, patientId: s.patientId,
-              physician: s.physician, department: s.department,
-              deptLabel: DEPT_LABELS[s.department],
-              message: `REMINDER: ${s.id} (${s.patientId}) at 50% retention — ${DEPT_LABELS[s.department]} dept dashboard updated.`,
-              channel: "dashboard",
-            });
+            // Yellow tier — aggregate by department
+            const dl = DEPT_LABELS[s.department];
+            yellowByDept[dl] = (yellowByDept[dl] || 0) + 1;
           }
           updatedMap[s.id] = { ...s, retentionHours: newRetention };
         }
+      });
+
+      // Emit aggregated orange notifications (one per department)
+      Object.entries(orangeByDept).forEach(([dept, count]) => {
+        newNotifs.push({
+          type: "urgent-alert", tier: "orange",
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `URGENT: ${count} sample(s) in ${dept} crossed 75% retention — physicians notified via Epic Beaker inbox.`,
+          channel: "epic-inbox",
+        });
+      });
+
+      // Emit aggregated yellow notifications (one per department)
+      Object.entries(yellowByDept).forEach(([dept, count]) => {
+        newNotifs.push({
+          type: "scheduled-alert", tier: "yellow",
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `REMINDER: ${count} sample(s) in ${dept} at 50% retention — department dashboard updated.`,
+          channel: "dashboard",
+        });
       });
 
       // Sort past-deadline: routine first (oldest depositTime first), then urgent, then stat
@@ -476,16 +495,24 @@ export default function App() {
       });
 
       // Mark capacity-pressure destructions in sorted order
+      const destroyedByDept = {};
       pastDeadline.forEach(s => {
+        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
+        const dl = DEPT_LABELS[s.department];
+        if (!destroyedByDept[dl]) destroyedByDept[dl] = { count: 0, testsLost: 0 };
+        destroyedByDept[dl].count++;
+        destroyedByDept[dl].testsLost += s.pendingTests.length;
+      });
+
+      // Emit aggregated destruction notifications (one per department)
+      Object.entries(destroyedByDept).forEach(([dept, { count, testsLost }]) => {
         newNotifs.push({
           type: "destruction", tier: "red",
-          sampleId: s.id, patientId: s.patientId,
-          physician: s.physician, department: s.department,
-          deptLabel: DEPT_LABELS[s.department],
-          message: `DESTROYED: ${s.id} (${s.patientId}) — ${s.pendingTests.length} test(s) lost. ${s.physician} and ${DEPT_LABELS[s.department]} dept notified.`,
+          sampleId: `${count} samples`, patientId: "",
+          physician: "", department: dept, deptLabel: dept,
+          message: `DESTROYED: ${count} sample(s) in ${dept} — ${testsLost} test(s) lost. Department and physicians notified.`,
           channel: "page + epic-inbox",
         });
-        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
       });
 
       const updated = prevSamples.map(s => updatedMap[s.id] || s);
@@ -499,7 +526,7 @@ export default function App() {
             const stamped = newNotifs.map((n, i) => ({
               ...n, id: prevId + i, time: futureNow, read: false,
             }));
-            setNotifications(prev => [...stamped, ...prev].slice(0, 500));
+            setNotifications(prev => [...stamped, ...prev].slice(0, 200));
             return prevId + newNotifs.length;
           });
         }, 0);
@@ -1111,7 +1138,7 @@ export default function App() {
 
     const falloutByDeptType = {};
     destroyedSamples.forEach(s => {
-      const key = `${DEPT_LABELS[s.department]} \u2014 ${s.type}`;
+      const key = `${DEPT_LABELS[s.department]} — ${s.type}`;
       falloutByDeptType[key] = (falloutByDeptType[key] || 0) + 1;
     });
     const highFallout = Object.entries(falloutByDeptType)
@@ -1128,10 +1155,10 @@ export default function App() {
           </h3>
           <div className="flex flex-wrap items-center gap-5">
             {[
-              { label: "\u03BB (arrival rate)", key: "lambda", unit: "samples/hr" },
-              { label: "\u03BC (service rate)", key: "mu", unit: "samples/hr" },
-              { label: "C\u2090\u00B2 (arrival CV\u00B2)", key: "ca2", unit: "" },
-              { label: "C\u209B\u00B2 (service CV\u00B2)", key: "cs2", unit: "" },
+              { label: "λ (arrival rate)", key: "lambda", unit: "samples/hr" },
+              { label: "μ (service rate)", key: "mu", unit: "samples/hr" },
+              { label: "Cₐ² (arrival CV²)", key: "ca2", unit: "" },
+              { label: "Cₛ² (service CV²)", key: "cs2", unit: "" },
             ].map(p => (
               <div key={p.key} className="flex items-center gap-2">
                 <span className="text-xs font-medium" style={{ color: COLORS.darkGray }}>{p.label}</span>
@@ -1156,14 +1183,14 @@ export default function App() {
 
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
-            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = \u03BBW)</h3>
+            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = λW)</h3>
             <div className="space-y-2">
               {[
-                { label: "\u03C1 (utilization)", value: rho.toFixed(3), warn: rho > 0.9 },
+                { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9 },
                 { label: "L (avg in system)", value: L },
                 { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
-                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "\u221E" : Lq.toFixed(1) },
-                { label: "Wq (avg wait time)", value: Wq > 900 ? "\u221E" : `${Wq.toFixed(1)} hrs` },
+                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
+                { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${Wq.toFixed(1)} hrs` },
               ].map(row => (
                 <div key={row.label} className="flex justify-between py-1.5 border-b" style={{ borderColor: COLORS.border }}>
                   <span className="text-xs" style={{ color: COLORS.darkGray }}>{row.label}</span>
@@ -1176,11 +1203,11 @@ export default function App() {
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
             <h3 className="text-sm font-semibold mb-2" style={{ color: COLORS.text }}>Kingman's Equation (VUT)</h3>
             <div className="text-xs font-mono mb-1 px-3 py-2 rounded" style={{ backgroundColor: "#F8FAFC", color: COLORS.darkGray }}>
-              Tq = (C\u2090\u00B2 + C\u209B\u00B2)/2 \u00D7 \u03C1/(1-\u03C1) \u00D7 1/\u03BC
+              Tq = (Cₐ² + Cₛ²)/2 × ρ/(1−ρ) × 1/μ
             </div>
             <div className="text-center py-3">
               <div className="text-3xl font-bold font-mono" style={{ color: Tq > 2 ? COLORS.red : COLORS.accent }}>
-                {Tq > 900 ? "\u221E" : Tq.toFixed(2)}
+                {Tq > 900 ? "∞" : Tq.toFixed(2)}
               </div>
               <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
             </div>
@@ -1209,7 +1236,7 @@ export default function App() {
             <thead>
               <tr className="border-b" style={{ borderColor: COLORS.border, backgroundColor: "#F8FAFC" }}>
                 <th className="px-3 py-2 text-left font-semibold">Scenario</th>
-                <th className="px-3 py-2 text-center font-semibold">{"\u03C1"}</th>
+                <th className="px-3 py-2 text-center font-semibold">ρ</th>
                 <th className="px-3 py-2 text-center font-semibold">Tq (hrs)</th>
                 <th className="px-3 py-2 text-center font-semibold">Est. Retention Met</th>
                 <th className="px-3 py-2 text-left font-semibold">Notes</th>
@@ -1253,7 +1280,7 @@ export default function App() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b" style={{ borderColor: COLORS.border }}>
-                  <th className="py-1.5 text-left font-semibold">Dept \u2014 Type</th>
+                  <th className="py-1.5 text-left font-semibold">Dept — Type</th>
                   <th className="py-1.5 text-center font-semibold">Count</th>
                   <th className="py-1.5 text-center font-semibold">%</th>
                 </tr>
@@ -1604,13 +1631,13 @@ export default function App() {
                 {tab.id === "alerts" && (alertCounts.red + alertCounts.orange + alertCounts.yellow) > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.red, color: "white" }}>
-                    {alertCounts.red + alertCounts.orange + alertCounts.yellow}
+                    {badgeCount(alertCounts.red + alertCounts.orange + alertCounts.yellow)}
                   </span>
                 )}
                 {tab.id === "notifications" && notifications.filter(n => !n.read).length > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.accent, color: "white" }}>
-                    {notifications.filter(n => !n.read).length}
+                    {badgeCount(notifications.filter(n => !n.read).length)}
                   </span>
                 )}
               </button>
