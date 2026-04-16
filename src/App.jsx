@@ -115,7 +115,12 @@ function generateSamples(now) {
     const availableTests = TEST_MENU[type] || TEST_MENU.other;
     const numTests = 1 + Math.floor(rng() * Math.min(3, availableTests.length));
     const shuffled = [...availableTests].sort(() => rng() - 0.5);
-    const pendingTests = shuffled.slice(0, numTests);
+    // ~4% of ACTIVE samples start with all tests complete (empty pendingTests).
+    // These are the candidates a Proactive Expiry Sweep will clear on cycle 1.
+    // Destroyed samples always keep their (historical) pendingTests for the
+    // destruction-log accounting, so the empty-queue seed only applies to actives.
+    let pendingTests = shuffled.slice(0, numTests);
+    if (!isDestroyed && rng() < 0.04) pendingTests = [];
 
     const scanError = rng() < 0.05;
     const id = `SMP-${String(1000 + i).padStart(4, "0")}`;
@@ -147,8 +152,14 @@ function generateSamples(now) {
 }
 
 // ─── Utility Functions ──────────────────────────────────────────────────────
-function getRetentionHours(priority, inDeptCount) {
-  const util = inDeptCount / IN_DEPT_CAPACITY;
+// `opts` may contain { capacity, smartQueue }.
+//   - capacity  : override effective in-dept capacity (default IN_DEPT_CAPACITY)
+//   - smartQueue: if true, stat samples are never compressed (full 168h always)
+function getRetentionHours(priority, inDeptCount, opts) {
+  const capacity = (opts && opts.capacity) || IN_DEPT_CAPACITY;
+  const smartQueue = !!(opts && opts.smartQueue);
+  const util = inDeptCount / capacity;
+  if (smartQueue && priority === "stat") return RETENTION_BASE.stat;
   if (util > 0.95) {
     if (priority === "routine") return 8;
     if (priority === "urgent") return 18;
@@ -162,6 +173,17 @@ function getRetentionHours(priority, inDeptCount) {
     if (priority === "urgent") return 48;
   }
   return RETENTION_BASE[priority];
+}
+
+// Staff-adjusted retention: low staffing shortens the effective window because
+// retrieval takes longer and samples can't be rescued in time. Never drops
+// below practical minimums (stat: 24h, urgent: 6h, routine: 2h).
+function getRetentionHoursWithStaff(priority, inDeptCount, staffMultiplier, opts) {
+  const base = getRetentionHours(priority, inDeptCount, opts);
+  if (staffMultiplier >= 1.0) return base;
+  const adjusted = Math.round(base * staffMultiplier);
+  const minimums = { stat: 24, urgent: 6, routine: 2 };
+  return Math.max(adjusted, minimums[priority]);
 }
 
 function getDeadline(s) {
@@ -198,8 +220,6 @@ function formatDateShort(d) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
     "  " + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
-
-function badgeCount(n) { return n > 99 ? "99+" : String(n); }
 
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 function StatCard({ icon: Icon, label, value, sub, color }) {
@@ -276,11 +296,97 @@ function UtilArc({ used, total, centralCount }) {
   );
 }
 
-function Toast({ message, onClose }) {
+function ToggleSwitch({ checked, onChange, color }) {
+  const c = color || "#2563EB";
+  return (
+    <button
+      type="button"
+      onClick={onChange}
+      aria-pressed={checked}
+      className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer flex-shrink-0"
+      style={{ backgroundColor: checked ? c : "#CBD5E1" }}>
+      <span
+        className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+        style={{ transform: checked ? "translateX(20px)" : "translateX(3px)" }} />
+    </button>
+  );
+}
+
+function InterventionPanel({ interventions, setInterventions, expanded, setExpanded }) {
+  const items = [
+    { key: "extraRack", label: "+1 Rack In-Dept", desc: "Capacity 840 → 960 slots", icon: Building2, color: "#2563EB" },
+    { key: "automatedRetrieval", label: "Automated Retrieval", desc: "Eliminates central-storage friction (Cₛ² 0.9 → 0.4)", icon: Crosshair, color: "#8B5CF6" },
+    { key: "smartQueue", label: "Smart Queue Policy", desc: "Stat samples protected from compression + destruction", icon: Activity, color: "#F59E0B" },
+    { key: "expirySweep", label: "Proactive Expiry Sweep", desc: "Auto-clear samples with all tests complete", icon: RefreshCw, color: "#10B981" },
+  ];
+  const activeCount = items.filter(i => interventions[i.key]).length;
+
+  return (
+    <div className="bg-white rounded-lg border" style={{ borderColor: "#E2E8F0" }}>
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex items-center justify-between px-4 py-2.5 cursor-pointer">
+        <div className="flex items-center gap-2">
+          <FlaskConical size={14} style={{ color: "#2563EB" }} />
+          <span className="text-sm font-semibold" style={{ color: "#1E293B" }}>Interventions</span>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full"
+            style={{
+              backgroundColor: activeCount > 0 ? "#10B981" + "15" : "#F1F5F9",
+              color: activeCount > 0 ? "#10B981" : "#94A3B8",
+            }}>
+            {activeCount} of 4 active
+          </span>
+        </div>
+        {expanded ? <ChevronDown size={14} style={{ color: "#475569" }} /> : <ChevronRight size={14} style={{ color: "#475569" }} />}
+      </button>
+      {expanded && (
+        <div className="px-4 pb-3 pt-1 grid grid-cols-4 gap-3 border-t" style={{ borderColor: "#E2E8F0" }}>
+          {items.map(it => {
+            const Icon = it.icon;
+            const on = interventions[it.key];
+            return (
+              <div key={it.key}
+                className="flex items-start gap-2 p-2.5 rounded-md border"
+                style={{
+                  borderColor: on ? it.color + "50" : "#E2E8F0",
+                  backgroundColor: on ? it.color + "08" : "transparent",
+                }}>
+                <div className="flex-shrink-0 mt-0.5">
+                  <Icon size={14} style={{ color: on ? it.color : "#94A3B8" }} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-0.5">
+                    <span className="text-xs font-semibold" style={{ color: "#1E293B" }}>{it.label}</span>
+                    <ToggleSwitch
+                      checked={on}
+                      onChange={() => setInterventions(prev => ({ ...prev, [it.key]: !prev[it.key] }))}
+                      color={it.color} />
+                  </div>
+                  <p className="text-[10px] leading-snug" style={{ color: "#64748B" }}>{it.desc}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Toast({ message, variant, onClose }) {
+  const v = variant || "success";
+  const palette = {
+    success: { color: COLORS.green, Icon: CheckCircle },
+    warning: { color: COLORS.orange, Icon: AlertTriangle },
+    error:   { color: COLORS.red, Icon: FileWarning },
+  }[v] || { color: COLORS.green, Icon: CheckCircle };
+  const { color, Icon } = palette;
   return (
     <div className="fixed top-4 right-4 z-50 toast-enter">
-      <div className="bg-white rounded-lg shadow-lg border px-4 py-3 flex items-center gap-3" style={{ borderColor: COLORS.green, maxWidth: 400 }}>
-        <CheckCircle size={18} style={{ color: COLORS.green }} />
+      <div className="bg-white rounded-lg shadow-lg border px-4 py-3 flex items-center gap-3"
+        style={{ borderColor: color, borderLeftWidth: 4, maxWidth: 420 }}>
+        <Icon size={18} style={{ color }} />
         <span className="text-sm" style={{ color: COLORS.text }}>{message}</span>
         <button onClick={onClose} className="ml-2 cursor-pointer"><X size={14} /></button>
       </div>
@@ -314,11 +420,36 @@ export default function App() {
   const [intakeForm, setIntakeForm] = useState({
     patientId: "", type: "blood", department: "emergency",
     physician: PHYSICIANS[0], priority: "routine", tests: [],
+    rackNum: Math.floor(Math.random() * IN_DEPT_RACKS) + 1,
+    rackPosition: Math.floor(Math.random() * RACK_CAPACITY) + 1,
   });
+  const [addOnPatientId, setAddOnPatientId] = useState("");
 
   const [analyticsParams, setAnalyticsParams] = useState({
     lambda: 52.5, mu: 55, ca2: 1.2, cs2: 0.9, capacity: 840, staffMultiplier: 1.0,
   });
+
+  // ─── Interventions (Tier 1) ───────────────────────────────────────────
+  const [interventions, setInterventions] = useState({
+    extraRack: false,
+    automatedRetrieval: false,
+    smartQueue: false,
+    expirySweep: false,
+  });
+  const [interventionsExpanded, setInterventionsExpanded] = useState(false);
+  // Cumulative counters that track destruction activity over the session.
+  // interventionStats = what ACTUALLY happened with toggles applied.
+  // baselineStats     = what WOULD HAVE happened with all toggles off,
+  //                     computed each advanceClock via a shadow simulation.
+  const [baselineStats, setBaselineStats] = useState({ destroyed: 0, testsLost: 0 });
+  const [interventionStats, setInterventionStats] = useState({ destroyed: 0, testsLost: 0 });
+  // Shadow-simulated in-dept headcount for a true baseline utilization figure.
+  // Starts null — populated on the first advanceClock tick, then updated each
+  // cycle to reflect "what the inventory would look like with no interventions".
+  const [baselineInDeptCount, setBaselineInDeptCount] = useState(null);
+
+  const effectiveCapacity = interventions.extraRack ? 960 : IN_DEPT_CAPACITY;
+  const anyInterventionActive = interventions.extraRack || interventions.automatedRetrieval || interventions.smartQueue || interventions.expirySweep;
 
   const [notifications, setNotifications] = useState(() => {
     // Seed some initial notifications from existing alert states
@@ -364,7 +495,7 @@ export default function App() {
   const destroyedSamples = useMemo(() => samples.filter(s => s.destroyed), [samples]);
   const inDeptCount = inDeptSamples.length;
   const centralCount = centralSamples.length;
-  const utilPct = (inDeptCount / IN_DEPT_CAPACITY) * 100;
+  const utilPct = (inDeptCount / effectiveCapacity) * 100;
   const scanErrorCount = useMemo(() => activeSamples.filter(s => s.scanError).length, [activeSamples]);
 
   // ─── Case Brief Stats (Change 1) ─────────────────────────────────────
@@ -395,9 +526,9 @@ export default function App() {
   }), [alertSamples]);
 
   // ─── Actions ──────────────────────────────────────────────────────────
-  const showToast = useCallback((msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
+  const showToast = useCallback((msg, variant) => {
+    setToast({ message: msg, variant: variant || "success" });
+    setTimeout(() => setToast(null), 3500);
   }, []);
 
   const advanceClock = useCallback(() => {
@@ -407,64 +538,41 @@ export default function App() {
       const newNotifs = [];
       const updatedMap = {};
 
-      // ── PHASE 0: Generate new sample arrivals for the 6-hour window ────
-      // At λ ≈ 52.5 samples/hr, 6 hours produces ~315 samples.
-      // Use a deterministic PRNG seeded from clock offset for reproducibility.
-      const arrivalRng = mulberry32(1000 + clockOffset);
-      const arrivalsCount = Math.round(52.5 * 6); // 315 samples per 6h cycle
-      const newArrivals = [];
-      const existingIds = new Set(prevSamples.map(s => s.id));
-      let autoId = prevSamples.length + 3000;
+      const capacity = interventions.extraRack ? 960 : IN_DEPT_CAPACITY;
+      const retOpts = { capacity, smartQueue: interventions.smartQueue };
 
-      for (let i = 0; i < arrivalsCount; i++) {
-        // Generate unique ID
-        let id;
-        do {
-          id = `SMP-${String(autoId++).padStart(4, "0")}`;
-        } while (existingIds.has(id));
-        existingIds.add(id);
-
-        const type = weightedPick(arrivalRng, TYPES, TYPE_WEIGHTS);
-        const dept = weightedPick(arrivalRng, DEPARTMENTS, DEPT_WEIGHTS);
-        const priority = weightedPick(arrivalRng, PRIORITIES, PRIORITY_WEIGHTS);
-        const physician = PHYSICIANS[Math.floor(arrivalRng() * PHYSICIANS.length)];
-        // Deposit time spread across the 6-hour window
-        const depositTime = new Date(prevNow.getTime() + arrivalRng() * 6 * 3600000);
-        const retentionHours = RETENTION_BASE[priority];
-        const availableTests = TEST_MENU[type] || TEST_MENU.other;
-        const numTests = 1 + Math.floor(arrivalRng() * Math.min(3, availableTests.length));
-        const shuffled = [...availableTests].sort(() => arrivalRng() - 0.5);
-        const pendingTests = shuffled.slice(0, numTests);
-        const scanError = arrivalRng() < 0.05;
-        const patientId = `PT-${String(10000 + Math.floor(arrivalRng() * 89999)).padStart(5, "0")}`;
-
-        // Assign to in-dept or central based on current occupancy
-        const currentInDept = prevSamples.filter(x => !x.destroyed && x.location === "in-department").length + newArrivals.filter(x => x.location === "in-department").length;
-        const location = currentInDept < IN_DEPT_CAPACITY ? "in-department" : "central-storage";
-        const rackNum = location === "in-department"
-          ? Math.floor(arrivalRng() * IN_DEPT_RACKS) + 1
-          : IN_DEPT_RACKS + Math.floor(arrivalRng() * CENTRAL_RACKS) + 1;
-        const rackId = `RACK-${String(rackNum).padStart(2, "0")}`;
-        const rackPosition = Math.floor(arrivalRng() * RACK_CAPACITY) + 1;
-
-        newArrivals.push({
-          id, patientId, rackId, rackPosition, scanError,
-          type, department: dept, physician, pendingTests,
-          priority, depositTime, retentionHours, location,
-          status: "active", destroyed: false, destroyedAt: null,
-          destructionReason: null, extensionCount: 0,
+      // ── PHASE 0: Proactive Expiry Sweep (intervention) ────────────────
+      // If the Proactive Expiry Sweep intervention is on, clear any active
+      // sample whose pending-test queue is empty — frees slots immediately.
+      let proactiveCleared = 0;
+      if (interventions.expirySweep) {
+        prevSamples.forEach(s => {
+          if (s.destroyed) return;
+          if ((s.pendingTests?.length || 0) === 0) {
+            proactiveCleared++;
+            updatedMap[s.id] = {
+              ...s, status: "destroyed", destroyed: true,
+              destroyedAt: futureNow, destructionReason: "completed",
+            };
+            newNotifs.push({
+              type: "sweep-cleared", tier: "green",
+              sampleId: s.id, patientId: s.patientId,
+              physician: s.physician, department: s.department,
+              deptLabel: DEPT_LABELS[s.department],
+              message: `CLEARED: ${s.id} (${s.patientId}) — all tests complete. Slot freed.`,
+              channel: "dashboard",
+            });
+          }
         });
       }
-
-      // Merge new arrivals into the sample set
-      const allSamples = [...prevSamples, ...newArrivals];
 
       // ── PHASE 1: Expiry Sweep ──────────────────────────────────────────
       // Destroy samples that exceeded their FULL (un-shortened) base retention.
       // This runs BEFORE capacity-pressure logic so freed slots reduce utilization.
       let swept = 0;
-      allSamples.forEach(s => {
+      prevSamples.forEach(s => {
         if (s.destroyed) { updatedMap[s.id] = s; return; }
+        if (updatedMap[s.id]?.destroyed) return;
         const baseRetention = RETENTION_BASE[s.priority];
         const elapsed = (futureNow - s.depositTime) / 3600000;
         if (elapsed >= baseRetention) {
@@ -475,16 +583,12 @@ export default function App() {
 
       // ── PHASE 2: Capacity-pressure retention overrides + alert tier crossings ──
       // Recalculate in-dept count AFTER expiry sweep
-      const inDeptAfterSweep = allSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
+      const inDeptAfterSweep = prevSamples.filter(x => !x.destroyed && !updatedMap[x.id]?.destroyed && x.location === "in-department").length;
       const pastDeadline = [];
 
-      // Track tier crossings: red = per-sample, orange/yellow = aggregated per-department
-      const orangeByDept = {};
-      const yellowByDept = {};
-
-      allSamples.forEach(s => {
+      prevSamples.forEach(s => {
         if (updatedMap[s.id]) return; // already swept or was already destroyed
-        const newRetention = getRetentionHours(s.priority, inDeptAfterSweep);
+        const newRetention = getRetentionHoursWithStaff(s.priority, inDeptAfterSweep, analyticsParams.staffMultiplier, retOpts);
         const deadline = new Date(s.depositTime.getTime() + newRetention * 3600000);
         const prevPct = ((prevNow - s.depositTime) / 3600000 / s.retentionHours) * 100;
         const newPct = ((futureNow - s.depositTime) / 3600000 / newRetention) * 100;
@@ -493,7 +597,6 @@ export default function App() {
           pastDeadline.push({ ...s, retentionHours: newRetention });
         } else {
           if (prevPct < 100 && newPct >= 100) {
-            // Red tier — keep per-sample (critical, needs individual physician page)
             newNotifs.push({
               type: "final-call", tier: "red",
               sampleId: s.id, patientId: s.patientId,
@@ -503,38 +606,26 @@ export default function App() {
               channel: "page",
             });
           } else if (prevPct < 75 && newPct >= 75) {
-            // Orange tier — aggregate by department
-            const dl = DEPT_LABELS[s.department];
-            orangeByDept[dl] = (orangeByDept[dl] || 0) + 1;
+            newNotifs.push({
+              type: "urgent-alert", tier: "orange",
+              sampleId: s.id, patientId: s.patientId,
+              physician: s.physician, department: s.department,
+              deptLabel: DEPT_LABELS[s.department],
+              message: `URGENT: ${s.id} (${s.patientId}) at ${newPct.toFixed(0)}% retention — sent to ${s.physician} via Epic Beaker inbox.`,
+              channel: "epic-inbox",
+            });
           } else if (prevPct < 50 && newPct >= 50) {
-            // Yellow tier — aggregate by department
-            const dl = DEPT_LABELS[s.department];
-            yellowByDept[dl] = (yellowByDept[dl] || 0) + 1;
+            newNotifs.push({
+              type: "scheduled-alert", tier: "yellow",
+              sampleId: s.id, patientId: s.patientId,
+              physician: s.physician, department: s.department,
+              deptLabel: DEPT_LABELS[s.department],
+              message: `REMINDER: ${s.id} (${s.patientId}) at 50% retention — ${DEPT_LABELS[s.department]} dept dashboard updated.`,
+              channel: "dashboard",
+            });
           }
           updatedMap[s.id] = { ...s, retentionHours: newRetention };
         }
-      });
-
-      // Emit aggregated orange notifications (one per department)
-      Object.entries(orangeByDept).forEach(([dept, count]) => {
-        newNotifs.push({
-          type: "urgent-alert", tier: "orange",
-          sampleId: `${count} samples`, patientId: "",
-          physician: "", department: dept, deptLabel: dept,
-          message: `URGENT: ${count} sample(s) in ${dept} crossed 75% retention — physicians notified via Epic Beaker inbox.`,
-          channel: "epic-inbox",
-        });
-      });
-
-      // Emit aggregated yellow notifications (one per department)
-      Object.entries(yellowByDept).forEach(([dept, count]) => {
-        newNotifs.push({
-          type: "scheduled-alert", tier: "yellow",
-          sampleId: `${count} samples`, patientId: "",
-          physician: "", department: dept, deptLabel: dept,
-          message: `REMINDER: ${count} sample(s) in ${dept} at 50% retention — department dashboard updated.`,
-          channel: "dashboard",
-        });
       });
 
       // Sort past-deadline: routine first (oldest depositTime first), then urgent, then stat
@@ -546,35 +637,88 @@ export default function App() {
         return a.depositTime - b.depositTime;
       });
 
-      // Mark capacity-pressure destructions in sorted order
-      const destroyedByDept = {};
+      // Mark capacity-pressure destructions in sorted order.
+      // Smart Queue: stat samples are skipped entirely — they survive
+      // even if past their (compressed) deadline.
+      let capDestroyed = 0;
+      let capTestsLost = 0;
       pastDeadline.forEach(s => {
-        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
-        const dl = DEPT_LABELS[s.department];
-        if (!destroyedByDept[dl]) destroyedByDept[dl] = { count: 0, testsLost: 0 };
-        destroyedByDept[dl].count++;
-        destroyedByDept[dl].testsLost += s.pendingTests.length;
-      });
-
-      // Emit aggregated destruction notifications (one per department)
-      Object.entries(destroyedByDept).forEach(([dept, { count, testsLost }]) => {
+        if (interventions.smartQueue && s.priority === "stat") {
+          // Grant stat samples a full base-retention lease and let them
+          // survive this cycle. They remain active with reset retentionHours.
+          updatedMap[s.id] = { ...s, retentionHours: RETENTION_BASE.stat };
+          return;
+        }
         newNotifs.push({
           type: "destruction", tier: "red",
-          sampleId: `${count} samples`, patientId: "",
-          physician: "", department: dept, deptLabel: dept,
-          message: `DESTROYED: ${count} sample(s) in ${dept} — ${testsLost} test(s) lost. Department and physicians notified.`,
+          sampleId: s.id, patientId: s.patientId,
+          physician: s.physician, department: s.department,
+          deptLabel: DEPT_LABELS[s.department],
+          message: `DESTROYED: ${s.id} (${s.patientId}) — ${s.pendingTests.length} test(s) lost. ${s.physician} and ${DEPT_LABELS[s.department]} dept notified.`,
           channel: "page + epic-inbox",
         });
+        updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "capacity-pressure" };
+        capDestroyed++;
+        capTestsLost += (s.pendingTests?.length || 0);
       });
 
-      const updated = allSamples.map(s => updatedMap[s.id] || s);
+      const updated = prevSamples.map(s => updatedMap[s.id] || s);
 
-      // Log cycle stats for debugging
-      const activeRemaining = updated.filter(s => !s.destroyed).length;
-      console.log(`[+6h] Arrivals: ${arrivalsCount} | Swept (expiry): ${swept} | Capacity-pressure: ${pastDeadline.length} | Active remaining: ${activeRemaining}`);
+      // Intervention stat tracking: count what actually happened this cycle
+      const cycleDestroyed = capDestroyed;  // "destroyed" here = tests-lost-relevant destructions
+      const cycleTestsLost = capTestsLost;
+
+      // Shadow sim: what WOULD have happened with zero interventions?
+      // (Capacity = 840, no smartQueue, no expirySweep — same staff multiplier.)
+      let baseCycleDestroyed = 0;
+      let baseCycleTestsLost = 0;
+      // Baseline in-dept reduction = natural expiries + cap-pressure destructions
+      // that occur specifically to in-department samples (where capacity pressure
+      // actually bites). Drives the shadow baselineInDeptCount below.
+      let baseInDeptReduction = 0;
+      let baseStartingInDept = 0;
+      {
+        const baseInDeptAfterSweep = prevSamples.filter(x =>
+          !x.destroyed && x.location === "in-department" &&
+          !((futureNow - x.depositTime) / 3600000 >= RETENTION_BASE[x.priority])
+        ).length;
+        baseStartingInDept = prevSamples.filter(x => !x.destroyed && x.location === "in-department").length;
+        prevSamples.forEach(s => {
+          if (s.destroyed) return;
+          const baseElapsed = (futureNow - s.depositTime) / 3600000;
+          if (baseElapsed >= RETENTION_BASE[s.priority]) {
+            // Would be swept by natural expiry in baseline world.
+            if (s.location === "in-department") baseInDeptReduction++;
+            return;
+          }
+          const baseRet = getRetentionHoursWithStaff(s.priority, baseInDeptAfterSweep, analyticsParams.staffMultiplier, { capacity: IN_DEPT_CAPACITY, smartQueue: false });
+          const baseDeadline = new Date(s.depositTime.getTime() + baseRet * 3600000);
+          if (futureNow >= baseDeadline) {
+            baseCycleDestroyed++;
+            baseCycleTestsLost += (s.pendingTests?.length || 0);
+            if (s.location === "in-department") baseInDeptReduction++;
+          }
+        });
+      }
 
       // Update sweep count for dashboard display
-      setTimeout(() => setSweepCount(swept), 0);
+      setTimeout(() => {
+        setSweepCount(swept + proactiveCleared);
+        setInterventionStats(prev => ({
+          destroyed: prev.destroyed + cycleDestroyed,
+          testsLost: prev.testsLost + cycleTestsLost,
+        }));
+        setBaselineStats(prev => ({
+          destroyed: prev.destroyed + baseCycleDestroyed,
+          testsLost: prev.testsLost + baseCycleTestsLost,
+        }));
+        // Shadow inDept count — initialize on first tick from the real in-dept
+        // headcount, then decrement by this cycle's baseline in-dept reductions.
+        setBaselineInDeptCount(prev => {
+          const start = prev === null ? baseStartingInDept : prev;
+          return Math.max(0, start - baseInDeptReduction);
+        });
+      }, 0);
 
       if (newNotifs.length > 0) {
         setTimeout(() => {
@@ -582,7 +726,7 @@ export default function App() {
             const stamped = newNotifs.map((n, i) => ({
               ...n, id: prevId + i, time: futureNow, read: false,
             }));
-            setNotifications(prev => [...stamped, ...prev].slice(0, 200));
+            setNotifications(prev => [...stamped, ...prev].slice(0, 500));
             return prevId + newNotifs.length;
           });
         }, 0);
@@ -591,7 +735,7 @@ export default function App() {
       return updated;
     });
     setClockOffset(prev => prev + 6);
-  }, [realNow, clockOffset]);
+  }, [realNow, clockOffset, analyticsParams.staffMultiplier, interventions]);
 
   const completeTest = useCallback((sampleId, testName) => {
     setSamples(prev => prev.map(s =>
@@ -623,14 +767,21 @@ export default function App() {
 
   const addSample = useCallback(() => {
     const form = intakeForm;
-    if (!form.patientId.trim()) return;
-    const loc = inDeptCount >= IN_DEPT_CAPACITY * 0.9 ? "central-storage" : "in-department";
-    const rackNum = loc === "in-department"
-      ? Math.floor(Math.random() * IN_DEPT_RACKS) + 1
-      : IN_DEPT_RACKS + Math.floor(Math.random() * CENTRAL_RACKS) + 1;
+    if (!form.patientId.trim()) {
+      showToast("Patient ID is required", "error");
+      return;
+    }
+    const rackNum = form.rackNum;
+    const pos = form.rackPosition;
     const rackId = `RACK-${String(rackNum).padStart(2, "0")}`;
-    const pos = Math.floor(Math.random() * RACK_CAPACITY) + 1;
-    const retention = getRetentionHours(form.priority, inDeptCount);
+    // Scan collision validation — reject if another ACTIVE sample occupies this slot
+    const collision = activeSamples.find(s => s.rackId === rackId && s.rackPosition === pos);
+    if (collision) {
+      showToast(`Scan collision: ${rackId} Position ${pos} already holds ${collision.id} (${collision.patientId})`, "error");
+      return;
+    }
+    const loc = rackNum <= IN_DEPT_RACKS ? "in-department" : "central-storage";
+    const retention = getRetentionHours(form.priority, inDeptCount, { capacity: effectiveCapacity, smartQueue: interventions.smartQueue });
     const newSample = {
       id: `SMP-${String(2000 + samples.length).padStart(4, "0")}`,
       patientId: form.patientId, rackId, rackPosition: pos, scanError: false,
@@ -641,9 +792,14 @@ export default function App() {
       status: "active", destroyed: false, destroyedAt: null, destructionReason: null, extensionCount: 0,
     };
     setSamples(prev => [newSample, ...prev]);
-    showToast(`Sample ${newSample.id} admitted to ${rackId}, Position ${pos}`);
-    setIntakeForm({ patientId: "", type: "blood", department: "emergency", physician: PHYSICIANS[0], priority: "routine", tests: [] });
-  }, [intakeForm, inDeptCount, samples.length, now, showToast]);
+    showToast(`Sample ${newSample.id} admitted to ${rackId}, Position ${pos}`, "success");
+    setIntakeForm({
+      patientId: "", type: "blood", department: "emergency",
+      physician: PHYSICIANS[0], priority: "routine", tests: [],
+      rackNum: Math.floor(Math.random() * IN_DEPT_RACKS) + 1,
+      rackPosition: Math.floor(Math.random() * RACK_CAPACITY) + 1,
+    });
+  }, [intakeForm, inDeptCount, samples.length, now, showToast, activeSamples, effectiveCapacity, interventions.smartQueue]);
 
   // ─── Demo Mode (Change 6) ────────────────────────────────────────────
   const DEMO_STEPS = [
@@ -656,6 +812,17 @@ export default function App() {
     { label: "Watch It Break More", action: () => { advanceClock(); } },
     { label: "Notification Cascade", action: () => setActiveTab("notifications") },
     { label: "What Fixes It", action: () => setActiveTab("analytics") },
+    { label: "Interventions Live", action: () => {
+        setInterventions({ extraRack: true, automatedRetrieval: true, smartQueue: true, expirySweep: true });
+        setInterventionsExpanded(true);
+        setActiveTab("dashboard");
+        // Tick the clock twice so the real simulation (with interventions on)
+        // and the shadow baseline (intervention-free) visibly diverge on the
+        // Baseline vs With-Interventions card. Short delays prevent the two
+        // setSamples calls from batching and swallowing the first tick.
+        setTimeout(() => advanceClock(), 120);
+        setTimeout(() => advanceClock(), 360);
+      } },
     { label: "The Aftermath", action: () => setActiveTab("destruction") },
   ];
 
@@ -689,19 +856,72 @@ export default function App() {
     }));
     const recentAlerts = alertSamples.slice(0, 8);
 
+    // Baseline vs With-Interventions comparison (shadow-simulated totals)
+    // baselineInDeptCount is populated by the shadow sim in advanceClock;
+    // fall back to current inDeptCount pre-first-tick so the card still
+    // renders a sensible number if it appears before any clock advance.
+    const shadowInDept = baselineInDeptCount === null ? inDeptCount : baselineInDeptCount;
+    const baselineUtilPct = (shadowInDept / IN_DEPT_CAPACITY) * 100;
+    const currentUtilPct = utilPct;
+    const destroyedDelta = baselineStats.destroyed - interventionStats.destroyed;
+    const testsLostDelta = baselineStats.testsLost - interventionStats.testsLost;
+    const utilDelta = baselineUtilPct - currentUtilPct;
+
+    const deltaRow = (label, baseVal, intVal, delta, fmt = (v) => v, higherIsWorse = true) => {
+      const improved = higherIsWorse ? delta > 0 : delta < 0;
+      const worsened = higherIsWorse ? delta < 0 : delta > 0;
+      const deltaColor = improved ? COLORS.green : worsened ? COLORS.red : COLORS.gray;
+      const ArrowIcon = improved ? (higherIsWorse ? ChevronDown : ChevronRight) : worsened ? (higherIsWorse ? ChevronRight : ChevronDown) : ChevronRight;
+      return (
+        <div className="grid grid-cols-3 gap-2 items-center py-1.5 border-b" style={{ borderColor: COLORS.border }}>
+          <span className="text-xs" style={{ color: COLORS.darkGray }}>{label}</span>
+          <span className="text-xs font-mono font-bold text-center" style={{ color: COLORS.text }}>{fmt(baseVal)}</span>
+          <span className="text-xs font-mono font-bold text-right flex items-center justify-end gap-1" style={{ color: deltaColor }}>
+            {fmt(intVal)}
+            {(improved || worsened) && <ArrowIcon size={12} style={{ color: deltaColor }} />}
+          </span>
+        </div>
+      );
+    };
+
     return (
       <div className="tab-content space-y-5">
         <div className="grid grid-cols-5 gap-4">
           <StatCard icon={Package} label="In-Dept Active" value={inDeptCount} sub={`${utilPct.toFixed(1)}% capacity`} color={COLORS.accent} />
-          <StatCard icon={Building2} label="Central Storage" value={centralCount} sub="Retrieval required" color={COLORS.orange} />
+          <StatCard icon={Building2} label="Central Storage" value={centralCount} sub={interventions.automatedRetrieval ? "Automated retrieval" : "Retrieval required"} color={interventions.automatedRetrieval ? COLORS.green : COLORS.orange} />
           <StatCard icon={AlertTriangle} label="In Alert" value={alertCounts.red + alertCounts.orange + alertCounts.yellow}
             sub={`${alertCounts.red} final · ${alertCounts.orange} urgent · ${alertCounts.yellow} sched`} color={COLORS.red} />
           <StatCard icon={ScanLine} label="Scan Errors" value={scanErrorCount} sub="Position discrepancies" color={COLORS.yellow} />
           <StatCard icon={RefreshCw} label="Swept This Cycle" value={sweepCount} sub="Expiry sweep cleared" color={COLORS.green} />
         </div>
 
+        {anyInterventionActive && (
+          <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.green + "40", backgroundColor: COLORS.green + "04" }}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold flex items-center gap-2" style={{ color: COLORS.text }}>
+                <TrendingUp size={14} style={{ color: COLORS.green }} /> Baseline vs. With Interventions
+              </h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full"
+                style={{ backgroundColor: COLORS.green + "15", color: COLORS.green }}>
+                shadow-simulated
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 pb-2 border-b" style={{ borderColor: COLORS.border }}>
+              <span className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: COLORS.gray }}>Metric</span>
+              <span className="text-[10px] uppercase tracking-wide font-semibold text-center" style={{ color: COLORS.gray }}>Baseline</span>
+              <span className="text-[10px] uppercase tracking-wide font-semibold text-right" style={{ color: COLORS.gray }}>With Interventions</span>
+            </div>
+            {deltaRow("Samples destroyed (cumulative)", baselineStats.destroyed, interventionStats.destroyed, destroyedDelta)}
+            {deltaRow("Tests lost (cumulative)", baselineStats.testsLost, interventionStats.testsLost, testsLostDelta)}
+            {deltaRow("In-dept utilization", baselineUtilPct, currentUtilPct, utilDelta, (v) => `${v.toFixed(1)}%`)}
+            <p className="text-[10px] mt-2" style={{ color: COLORS.gray }}>
+              Baseline runs a shadow simulation with no interventions active, accumulated across the session — deltas reflect the difference caused by active interventions.
+            </p>
+          </div>
+        )}
+
         <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
-          <CapacityBar used={inDeptCount} total={IN_DEPT_CAPACITY} />
+          <CapacityBar used={inDeptCount} total={effectiveCapacity} />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -777,8 +997,8 @@ export default function App() {
       if (k === "riskScore") {
         const pctA = getElapsedPct(a, now);
         const pctB = getElapsedPct(b, now);
-        va = (pctA / 100) * (a.location === "central-storage" ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
-        vb = (pctB / 100) * (b.location === "central-storage" ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
+        va = (pctA / 100) * (a.location === "central-storage" && !interventions.automatedRetrieval ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
+        vb = (pctB / 100) * (b.location === "central-storage" && !interventions.automatedRetrieval ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
       } else {
         va = a[k]; vb = b[k];
       }
@@ -862,7 +1082,7 @@ export default function App() {
                 const pct = getElapsedPct(s, now);
                 const elapsedPct = pct;
                 const remColor = pct >= 75 ? COLORS.red : pct >= 50 ? COLORS.yellow : COLORS.green;
-                const riskScore = (elapsedPct / 100) * (s.location === "central-storage" ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
+                const riskScore = (elapsedPct / 100) * (s.location === "central-storage" && !interventions.automatedRetrieval ? 1.3 : 1.0) * (analyticsParams.staffMultiplier < 0.8 ? 1.2 : 1.0);
                 let riskLabel, riskColor;
                 if (riskScore >= 1.0) { riskLabel = "Critical"; riskColor = COLORS.red; }
                 else if (riskScore >= 0.75) { riskLabel = "High"; riskColor = COLORS.orange; }
@@ -974,9 +1194,14 @@ export default function App() {
                         {s.location === "central-storage" && <span>{"\uD83C\uDFE2"}</span>}
                         <span className="ml-auto font-mono text-sm font-bold" style={{ color: tier.color }}>{getRemainingStr(s, now)}</span>
                       </div>
-                      {s.location === "central-storage" && (
+                      {s.location === "central-storage" && !interventions.automatedRetrieval && (
                         <div className="text-xs italic mb-2" style={{ color: COLORS.orange }}>
                           Retrieval requires leaving work area — central storage
+                        </div>
+                      )}
+                      {s.location === "central-storage" && interventions.automatedRetrieval && (
+                        <div className="text-xs italic mb-2" style={{ color: COLORS.green }}>
+                          Automated retrieval dispatched — no manual intervention required
                         </div>
                       )}
                       <div className="flex flex-wrap gap-1.5 mb-2">
@@ -1018,8 +1243,39 @@ export default function App() {
   // ─── RENDER: Intake ───────────────────────────────────────────────────
   function renderIntake() {
     const availTests = TEST_MENU[intakeForm.type] || TEST_MENU.other;
-    const suggestedLoc = inDeptCount >= IN_DEPT_CAPACITY * 0.9 ? "Central Storage" : "In-Department";
-    const assignedRetention = getRetentionHours(intakeForm.priority, inDeptCount);
+    const suggestedLoc = inDeptCount >= effectiveCapacity * 0.9 ? "Central Storage" : "In-Department";
+    const assignedRetention = getRetentionHours(intakeForm.priority, inDeptCount, { capacity: effectiveCapacity, smartQueue: interventions.smartQueue });
+    const plannedRackId = `RACK-${String(intakeForm.rackNum).padStart(2, "0")}`;
+    const plannedLoc = intakeForm.rackNum <= IN_DEPT_RACKS ? "In-Department" : "Central Storage";
+    const collisionSample = activeSamples.find(s => s.rackId === plannedRackId && s.rackPosition === intakeForm.rackPosition);
+
+    // ── Add-On Test Request lookup ──────────────────────────────────────
+    const addOnQ = addOnPatientId.trim().toLowerCase();
+    let addOnState = "idle"; // idle | green | orange | red | gray
+    let addOnHit = null;
+    let addOnDestroyed = null;
+    // Location / retrieval messaging — conditional on Automated Retrieval toggle.
+    // Returns the sentence fragment shown in both green and orange cards.
+    const retrievalNote = (hit) => {
+      if (!hit) return "";
+      if (hit.location === "in-department") return "Sample located in-department — immediate access.";
+      return interventions.automatedRetrieval
+        ? "Sample in central storage — automated retrieval will dispatch."
+        : "Sample in central storage — requires manual retrieval (~20 min).";
+    };
+    if (addOnQ.length > 0) {
+      addOnHit = activeSamples.find(s => s.patientId.toLowerCase() === addOnQ);
+      if (addOnHit) {
+        const remMs = addOnHit.depositTime.getTime() + addOnHit.retentionHours * 3600000 - now.getTime();
+        const remHrs = remMs / 3600000;
+        if (remHrs >= 48) addOnState = "green";
+        else addOnState = "orange";
+      } else {
+        addOnDestroyed = destroyedSamples.find(s => s.patientId.toLowerCase() === addOnQ);
+        if (addOnDestroyed) addOnState = "red";
+        else addOnState = "gray";
+      }
+    }
 
     return (
       <div className="tab-content">
@@ -1091,9 +1347,61 @@ export default function App() {
                 ))}
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>
+                  Rack (1–{IN_DEPT_RACKS + CENTRAL_RACKS})
+                </label>
+                <input type="number" min="1" max={IN_DEPT_RACKS + CENTRAL_RACKS}
+                  value={intakeForm.rackNum}
+                  onChange={e => setIntakeForm(p => ({ ...p, rackNum: Math.min(IN_DEPT_RACKS + CENTRAL_RACKS, Math.max(1, parseInt(e.target.value) || 1)) }))}
+                  className="w-full px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                  style={{ borderColor: collisionSample ? COLORS.red : COLORS.border }} />
+                <span className="text-[10px] mt-0.5 block" style={{ color: COLORS.gray }}>
+                  {plannedRackId} ({plannedLoc})
+                </span>
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>
+                  Rack Position (1–{RACK_CAPACITY})
+                </label>
+                <input type="number" min="1" max={RACK_CAPACITY}
+                  value={intakeForm.rackPosition}
+                  onChange={e => setIntakeForm(p => ({ ...p, rackPosition: Math.min(RACK_CAPACITY, Math.max(1, parseInt(e.target.value) || 1)) }))}
+                  className="w-full px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                  style={{ borderColor: collisionSample ? COLORS.red : COLORS.border }} />
+                <button type="button"
+                  onClick={() => setIntakeForm(p => ({
+                    ...p,
+                    rackNum: Math.floor(Math.random() * IN_DEPT_RACKS) + 1,
+                    rackPosition: Math.floor(Math.random() * RACK_CAPACITY) + 1,
+                  }))}
+                  className="text-[10px] mt-0.5 underline cursor-pointer"
+                  style={{ color: COLORS.accent }}>randomize</button>
+              </div>
+            </div>
+            {collisionSample && (
+              <div className="px-3 py-2 rounded flex items-start gap-2"
+                style={{ backgroundColor: COLORS.red + "10", border: `1px solid ${COLORS.red}40` }}>
+                <AlertTriangle size={14} style={{ color: COLORS.red, marginTop: 1 }} />
+                <div className="flex-1">
+                  <div className="text-xs font-semibold" style={{ color: COLORS.red }}>Scan collision</div>
+                  <div className="text-[11px]" style={{ color: COLORS.darkGray }}>
+                    {plannedRackId} Position {intakeForm.rackPosition} already holds{" "}
+                    <span className="font-mono font-bold">{collisionSample.id}</span> ({collisionSample.patientId}).
+                    Admit will be rejected.
+                  </div>
+                </div>
+              </div>
+            )}
             <button onClick={addSample}
-              className="w-full py-2.5 rounded-lg text-sm font-semibold text-white cursor-pointer"
-              style={{ backgroundColor: COLORS.accent }}>Admit Sample</button>
+              disabled={!!collisionSample}
+              className="w-full py-2.5 rounded-lg text-sm font-semibold text-white"
+              style={{
+                backgroundColor: collisionSample ? COLORS.gray : COLORS.accent,
+                cursor: collisionSample ? "not-allowed" : "pointer",
+                opacity: collisionSample ? 0.65 : 1,
+              }}>Admit Sample</button>
           </div>
 
           <div className="bg-white rounded-lg p-5 border" style={{ borderColor: COLORS.border }}>
@@ -1123,6 +1431,14 @@ export default function App() {
                   {suggestedLoc}{suggestedLoc === "Central Storage" && " (in-dept full)"}
                 </span>
               </div>
+              <div className="flex justify-between py-2 border-b" style={{ borderColor: COLORS.border }}>
+                <span className="text-xs" style={{ color: COLORS.gray }}>Planned Slot</span>
+                <span className="text-xs font-mono font-medium"
+                  style={{ color: collisionSample ? COLORS.red : COLORS.text }}>
+                  {plannedRackId}-{String(intakeForm.rackPosition).padStart(3, "0")}
+                  {collisionSample && <span className="ml-1.5">⚠</span>}
+                </span>
+              </div>
               <div className="py-2">
                 <span className="text-xs block mb-1.5" style={{ color: COLORS.gray }}>Tests ({intakeForm.tests.length})</span>
                 <div className="flex flex-wrap gap-1.5">
@@ -1137,6 +1453,138 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* ── Add-On Test Request Panel ────────────────────────────── */}
+        <div className="mt-6 bg-white rounded-lg p-5 border" style={{ borderColor: COLORS.border }}>
+          <div className="flex items-center gap-2 mb-1">
+            <ClipboardList size={14} style={{ color: COLORS.accent }} />
+            <h3 className="text-sm font-semibold" style={{ color: COLORS.text }}>Add-On Test Request</h3>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: "#F1F5F9", color: COLORS.gray }}>
+              late-clinician workflow
+            </span>
+          </div>
+          <p className="text-xs mb-3" style={{ color: COLORS.gray }}>
+            Physician requests an additional test on an existing sample. Look up by Patient ID to see if the sample is still viable.
+          </p>
+          <div className="grid grid-cols-3 gap-5">
+            <div className="col-span-1">
+              <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>Patient ID</label>
+              <div className="flex gap-2">
+                <input type="text" placeholder="PT-XXXXX"
+                  value={addOnPatientId}
+                  onChange={e => setAddOnPatientId(e.target.value)}
+                  className="flex-1 px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                  style={{ borderColor: COLORS.border }} />
+                <button type="button" onClick={() => setAddOnPatientId("")}
+                  className="px-2.5 py-2 rounded border text-xs cursor-pointer"
+                  style={{ borderColor: COLORS.border, color: COLORS.gray }}>
+                  Clear
+                </button>
+              </div>
+              <div className="text-[10px] mt-2" style={{ color: COLORS.gray }}>
+                Try one of the active Patient IDs from the Inventory tab.
+              </div>
+            </div>
+            <div className="col-span-2">
+              {addOnState === "idle" && (
+                <div className="h-full flex items-center justify-center rounded border-2 border-dashed"
+                  style={{ borderColor: COLORS.border, minHeight: 120 }}>
+                  <span className="text-xs" style={{ color: COLORS.gray }}>Enter a Patient ID to check add-on eligibility.</span>
+                </div>
+              )}
+              {addOnState === "gray" && (
+                <div className="rounded-lg p-3 flex items-start gap-3"
+                  style={{ backgroundColor: "#F1F5F9", border: `1px solid ${COLORS.border}` }}>
+                  <Search size={16} style={{ color: COLORS.gray, marginTop: 2 }} />
+                  <div>
+                    <div className="text-sm font-semibold" style={{ color: COLORS.darkGray }}>No sample on file</div>
+                    <div className="text-xs" style={{ color: COLORS.gray }}>
+                      Patient <span className="font-mono">{addOnPatientId}</span> has no sample in the lab system.
+                      Add-on is not possible — a new draw must be ordered.
+                    </div>
+                  </div>
+                </div>
+              )}
+              {addOnState === "green" && addOnHit && (
+                <div className="rounded-lg p-3 flex items-start gap-3"
+                  style={{ backgroundColor: COLORS.green + "10", border: `1px solid ${COLORS.green}50` }}>
+                  <CheckCircle size={16} style={{ color: COLORS.green, marginTop: 2 }} />
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold" style={{ color: COLORS.green }}>Add-on eligible</div>
+                    <div className="text-xs mt-0.5" style={{ color: COLORS.darkGray }}>
+                      <span className="font-mono font-bold">{addOnHit.id}</span> · {DEPT_LABELS[addOnHit.department]} · {addOnHit.type}
+                      · {addOnHit.rackId}-{String(addOnHit.rackPosition).padStart(3, "0")}
+                    </div>
+                    <div className="text-xs mt-1.5 flex items-center gap-2" style={{ color: COLORS.darkGray }}>
+                      <Clock size={12} style={{ color: COLORS.green }} />
+                      Remaining retention: <span className="font-mono font-bold" style={{ color: COLORS.green }}>{getRemainingStr(addOnHit, now)}</span>
+                      <PriorityBadge priority={addOnHit.priority} />
+                    </div>
+                    <div className="text-[11px] mt-1.5" style={{ color: COLORS.darkGray }}>
+                      {retrievalNote(addOnHit)}
+                    </div>
+                    <div className="text-[11px] mt-0.5" style={{ color: COLORS.darkGray }}>
+                      {addOnHit.pendingTests.length} test{addOnHit.pendingTests.length === 1 ? "" : "s"} still pending on this sample.
+                    </div>
+                    <button type="button"
+                      onClick={() => showToast(`Add-on request logged for ${addOnHit.id} (${addOnHit.patientId})`, "success")}
+                      className="mt-2 px-3 py-1.5 rounded text-[11px] font-semibold text-white cursor-pointer"
+                      style={{ backgroundColor: COLORS.green }}>
+                      Submit Add-On Request
+                    </button>
+                  </div>
+                </div>
+              )}
+              {addOnState === "orange" && addOnHit && (
+                <div className="rounded-lg p-3 flex items-start gap-3"
+                  style={{ backgroundColor: COLORS.orange + "10", border: `1px solid ${COLORS.orange}50` }}>
+                  <AlertTriangle size={16} style={{ color: COLORS.orange, marginTop: 2 }} />
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold" style={{ color: COLORS.orange }}>Tight window — act fast</div>
+                    <div className="text-xs mt-0.5" style={{ color: COLORS.darkGray }}>
+                      <span className="font-mono font-bold">{addOnHit.id}</span> · {DEPT_LABELS[addOnHit.department]} · {addOnHit.type}
+                      · {addOnHit.rackId}-{String(addOnHit.rackPosition).padStart(3, "0")}
+                    </div>
+                    <div className="text-xs mt-1.5 flex items-center gap-2" style={{ color: COLORS.darkGray }}>
+                      <Clock size={12} style={{ color: COLORS.orange }} />
+                      Remaining retention: <span className="font-mono font-bold" style={{ color: COLORS.orange }}>{getRemainingStr(addOnHit, now)}</span>
+                      <PriorityBadge priority={addOnHit.priority} />
+                    </div>
+                    <div className="text-[11px] mt-1.5" style={{ color: COLORS.orange }}>
+                      Under 48h left — expedite to avoid missing the window. {retrievalNote(addOnHit)}
+                    </div>
+                    <div className="text-[11px] mt-0.5" style={{ color: COLORS.darkGray }}>
+                      {addOnHit.pendingTests.length} test{addOnHit.pendingTests.length === 1 ? "" : "s"} still pending on this sample.
+                    </div>
+                    <button type="button"
+                      onClick={() => showToast(`Urgent add-on flagged for ${addOnHit.id} (${addOnHit.patientId})`, "warning")}
+                      className="mt-2 px-3 py-1.5 rounded text-[11px] font-semibold text-white cursor-pointer"
+                      style={{ backgroundColor: COLORS.orange }}>
+                      Flag as Urgent Add-On
+                    </button>
+                  </div>
+                </div>
+              )}
+              {addOnState === "red" && addOnDestroyed && (
+                <div className="rounded-lg p-3 flex items-start gap-3"
+                  style={{ backgroundColor: COLORS.red + "10", border: `1px solid ${COLORS.red}50` }}>
+                  <FileWarning size={16} style={{ color: COLORS.red, marginTop: 2 }} />
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold" style={{ color: COLORS.red }}>Sample destroyed — recollect</div>
+                    <div className="text-xs mt-0.5" style={{ color: COLORS.darkGray }}>
+                      <span className="font-mono font-bold">{addOnDestroyed.id}</span> was destroyed
+                      {addOnDestroyed.destructionReason && ` (${addOnDestroyed.destructionReason.replace("-", " ")})`}.
+                    </div>
+                    <div className="text-[11px] mt-1.5" style={{ color: COLORS.darkGray }}>
+                      No add-on is possible — clinician must order a new draw. This is the cost of premature destruction.
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1144,48 +1592,50 @@ export default function App() {
   // ─── RENDER: Analytics ────────────────────────────────────────────────
   function renderAnalytics() {
     const { lambda, mu, ca2, cs2, staffMultiplier } = analyticsParams;
-    const effectiveMu = mu * staffMultiplier;
-    const effectiveCs2 = Math.min(2.0, cs2 + Math.max(0, (1.0 - staffMultiplier) / 0.1) * 0.15);
+    // Base effective μ (staff-adjusted), then boosted by expiry sweep if on.
+    const staffAdjustedMu = mu * staffMultiplier;
+    const effectiveMu = staffAdjustedMu * (interventions.expirySweep ? 1.05 : 1.0);
+    // Base effective Cₛ² — if Automated Retrieval is on, Cₛ² drops to 0.4
+    // (reduced service variability); staff understaffing still amplifies it.
+    const baseCs2 = interventions.automatedRetrieval ? 0.4 : cs2;
+    const effectiveCs2 = Math.min(2.0, baseCs2 + Math.max(0, (1.0 - staffMultiplier) / 0.1) * 0.15);
     const rho = lambda / effectiveMu;
-    const Tq = rho > 0 && rho < 1 ? ((ca2 + effectiveCs2) / 2) * (rho / (1 - rho)) * (1 / effectiveMu) : 999;
-    const serviceTime = 1 / effectiveMu; // hours per sample
-    const W = Tq < 900 ? Tq + serviceTime : 999; // avg time in system (queue + processing)
-    const L = W < 900 ? lambda * W : 999; // avg samples in system (Little's Law)
+    // Little's Law (M/M/1 steady-state): L = ρ/(1−ρ), W = L/λ = 1/(μ−λ)
+    // L is the average number of samples simultaneously in the system at these
+    // arrival/service rates — a flow metric, not the current inventory count.
+    const L  = rho > 0 && rho < 1 ? rho / (1 - rho) : 999;
+    const W  = rho > 0 && rho < 1 ? L / lambda : 999;        // hours
     const Lq = rho > 0 && rho < 1 ? (rho * rho) / (1 - rho) : 999;
-    const Wq = Tq; // queue wait = Tq
+    const Wq = Lq / lambda;
+    const Tq = rho > 0 && rho < 1 ? ((ca2 + effectiveCs2) / 2) * (rho / (1 - rho)) * (1 / effectiveMu) : 999;
 
     const sensitivityData = [];
-    let sensitivityMax = 0;
     for (let r = 0.5; r <= 0.99; r += 0.02) {
       const tq = ((ca2 + effectiveCs2) / 2) * (r / (1 - r)) * (1 / effectiveMu);
-      const valMin = parseFloat((tq * 60).toFixed(1)); // display in minutes
-      sensitivityData.push({ rho: r.toFixed(2), Tq: valMin });
-      if (valMin > sensitivityMax) sensitivityMax = valMin;
+      sensitivityData.push({ rho: r.toFixed(2), Tq: parseFloat(tq.toFixed(2)) });
     }
-    const yAxisMax = Math.ceil(sensitivityMax * 1.15); // round up to nearest integer (minutes)
+
+    // Human-readable list of what interventions are feeding the live math.
+    const activeMathInterventions = [];
+    if (interventions.automatedRetrieval) activeMathInterventions.push("Automated Retrieval (Cₛ² → 0.4)");
+    if (interventions.expirySweep) activeMathInterventions.push("Expiry Sweep (μ × 1.05)");
+    if (interventions.extraRack) activeMathInterventions.push("+1 Rack (capacity 960)");
+    if (interventions.smartQueue) activeMathInterventions.push("Smart Queue (policy-only — no ρ/Tq effect)");
 
     const autoCs2 = 0.4;
-    // Scenarios derive from current parameters — +1 Rack increases μ by ~15%, Automated Retrieval cuts Cs²
-    const rackMu = effectiveMu * 1.15; // 960 slots = ~15% more throughput capacity
-    const rhoRack = lambda / rackMu;
-    const rhoBoth = lambda / rackMu;
     const scenarios = [
-      { name: "Current State", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "As-is operations" },
-      { name: "+1 Rack In-Dept", rho: rhoRack, cs2Used: effectiveCs2, muUsed: rackMu, desc: "960 slot capacity" },
-      { name: "Automated Retrieval", rho: rho, cs2Used: autoCs2, muUsed: effectiveMu, desc: "Reduced service variability" },
-      { name: "Both Interventions", rho: rhoBoth, cs2Used: autoCs2, muUsed: rackMu, desc: "Expanded + automated" },
-      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Routine-first destruction — no capital cost", retOverride: 87 },
-      { name: "Expiry Sweep", rho: lambda / (effectiveMu * 1.05), cs2Used: effectiveCs2, muUsed: effectiveMu * 1.05, desc: "Proactive expired sample clearance — μ×1.05" },
+      { name: "Current State", rho: 0.95, cs2Used: effectiveCs2, desc: "As-is operations" },
+      { name: "+1 Rack In-Dept", rho: 0.87, cs2Used: effectiveCs2, desc: "960 slot capacity" },
+      { name: "Automated Retrieval", rho: 0.95, cs2Used: autoCs2, desc: "Reduced service variability" },
+      { name: "Both Interventions", rho: 0.87, cs2Used: autoCs2, desc: "Expanded + automated" },
+      { name: "Smart Queue Policy", rho: 0.95, cs2Used: effectiveCs2, desc: "Stat-sample protection — routine destroyed first under pressure" },
+      { name: "Expiry Sweep", rho: 0.95, cs2Used: effectiveCs2, desc: "Proactive expired sample clearance — μ×1.05", muOverride: staffAdjustedMu * 1.05 },
     ];
     const scenarioData = scenarios.map(s => {
-      const tq = s.rho > 0 && s.rho < 1
-        ? ((ca2 + s.cs2Used) / 2) * (s.rho / (1 - s.rho)) * (1 / s.muUsed)
-        : 999;
-      const retMet = s.retOverride != null
-        ? s.retOverride
-        : Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
-      const tqMin = tq < 900 ? Math.round(tq * 60) : "∞";
-      return { ...s, tq: tqMin, retMet: typeof retMet === "number" ? retMet.toFixed(0) : retMet };
+      const muForScenario = s.muOverride || effectiveMu;
+      const tq = ((ca2 + s.cs2Used) / 2) * (s.rho / (1 - s.rho)) * (1 / muForScenario);
+      const retMet = Math.max(0, Math.min(100, 100 - (tq / (RETENTION_BASE.routine / 24)) * 100));
+      return { ...s, tq: tq.toFixed(1), retMet: retMet.toFixed(0) };
     });
 
     const capPressureCount = destroyedSamples.filter(s => s.destructionReason === "capacity-pressure").length;
@@ -1207,7 +1657,7 @@ export default function App() {
 
     const falloutByDeptType = {};
     destroyedSamples.forEach(s => {
-      const key = `${DEPT_LABELS[s.department]} — ${s.type}`;
+      const key = `${DEPT_LABELS[s.department]} \u2014 ${s.type}`;
       falloutByDeptType[key] = (falloutByDeptType[key] || 0) + 1;
     });
     const highFallout = Object.entries(falloutByDeptType)
@@ -1215,28 +1665,33 @@ export default function App() {
       .map(([name, count]) => ({ name, count, pct: ((count / Math.max(destroyedSamples.length, 1)) * 100).toFixed(1) }));
 
     const inputCls = "w-20 px-2 py-1 rounded border text-xs font-mono text-center outline-none focus:ring-1 focus:ring-blue-400";
-    const explainStyle = { color: COLORS.darkGray, fontSize: 13, lineHeight: 1.6, marginTop: 10 };
-
-    // VUT factors for Kingman explanation
-    const V = (ca2 + effectiveCs2) / 2;
-    const U = rho > 0 && rho < 1 ? rho / (1 - rho) : 999;
-    const T = 1 / effectiveMu;
-    const Tp = T * 60; // process time in minutes
-    const rhoPct = (rho * 100).toFixed(1);
-    const waitPct = W > 0 ? ((Wq / W) * 100).toFixed(0) : "0";
 
     return (
       <div className="tab-content space-y-5">
+        {activeMathInterventions.length > 0 && (
+          <div className="rounded-lg px-4 py-2.5 flex items-start gap-2"
+            style={{ backgroundColor: COLORS.accent + "0C", border: `1px solid ${COLORS.accent}40` }}>
+            <Activity size={14} style={{ color: COLORS.accent, marginTop: 2 }} />
+            <div className="flex-1">
+              <div className="text-xs font-semibold" style={{ color: COLORS.accent }}>
+                Live parameters reflect {activeMathInterventions.length} active intervention{activeMathInterventions.length === 1 ? "" : "s"}
+              </div>
+              <div className="text-[11px] mt-0.5" style={{ color: COLORS.darkGray }}>
+                {activeMathInterventions.join(" · ")}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
           <h3 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: COLORS.text }}>
             <Activity size={16} style={{ color: COLORS.accent }} /> System Parameters
           </h3>
           <div className="flex flex-wrap items-center gap-5">
             {[
-              { label: "λ (arrival rate)", key: "lambda", unit: "samples/hr" },
-              { label: "μ (service rate)", key: "mu", unit: "samples/hr" },
-              { label: "Cₐ² (arrival CV²)", key: "ca2", unit: "" },
-              { label: "Cₛ² (service CV²)", key: "cs2", unit: "" },
+              { label: "\u03BB (arrival rate)", key: "lambda", unit: "samples/hr" },
+              { label: "\u03BC (service rate)", key: "mu", unit: "samples/hr" },
+              { label: "C\u2090\u00B2 (arrival CV\u00B2)", key: "ca2", unit: "" },
+              { label: "C\u209B\u00B2 (service CV\u00B2)", key: "cs2", unit: "" },
             ].map(p => (
               <div key={p.key} className="flex items-center gap-2">
                 <span className="text-xs font-medium" style={{ color: COLORS.darkGray }}>{p.label}</span>
@@ -1257,87 +1712,56 @@ export default function App() {
                 onChange={e => setAnalyticsParams(prev => ({ ...prev, staffMultiplier: Math.min(1.0, Math.max(0.5, parseFloat(e.target.value) || 0.5)) }))} />
             </div>
           </div>
-          <p style={explainStyle}>
-            {rho >= 0.95
-              ? `The lab is receiving ${lambda.toFixed(1)} samples per hour but can only process ${effectiveMu.toFixed(1)} per hour. That puts utilization at ${rhoPct}% \u2014 deep in the danger zone. At this level, the system has almost no slack to absorb normal variation in arrivals or processing times. Even small surges will cause samples to queue up and burn through their retention windows.`
-              : rho >= 0.80
-              ? `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system is approaching the critical threshold. It can still absorb minor variation, but any increase in arrivals or decrease in staffing will push it into the danger zone.`
-              : `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system has healthy slack capacity. Arrival surges and processing inconsistencies can be absorbed without significant queue buildup.`}
-          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
-            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = λW)</h3>
+            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Little's Law (L = \u03BBW)</h3>
             <div className="space-y-2">
               {[
-                { label: "ρ (utilization)", value: rho.toFixed(3), warn: rho > 0.9, tooltip: "ρ measures throughput utilization (arrival rate ÷ processing rate), not current slot occupancy. The system can show low inventory at a snapshot in time while still running at high throughput utilization — because samples are flowing in and out rapidly, even if few are stored at any given moment." },
-                { label: "L (avg in system)", value: L > 900 ? "∞" : L.toFixed(1) },
-                { label: "W (avg time in system)", value: W > 900 ? "∞" : `${(W * 60).toFixed(1)} min` },
-                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "∞" : Lq.toFixed(1) },
-                { label: "Wq (avg wait time)", value: Wq > 900 ? "∞" : `${(Wq * 60).toFixed(1)} min` },
+                { label: "\u03C1 (utilization)", value: rho.toFixed(3), warn: rho > 0.9,
+                  sub: interventions.extraRack ? "Capacity: 960 slots (+1 rack)" : "Capacity: 840 slots" },
+                { label: "L (avg in system)", value: L },
+                { label: "W (avg time in system)", value: `${W.toFixed(1)} hrs` },
+                { label: "Lq (avg waiting/at-risk)", value: Lq > 900 ? "\u221E" : Lq.toFixed(1) },
+                { label: "Wq (avg wait time)", value: Wq > 900 ? "\u221E" : `${Wq.toFixed(1)} hrs` },
               ].map(row => (
-                <div key={row.label} className="flex justify-between py-1.5 border-b" style={{ borderColor: COLORS.border }}>
-                  <span className="text-xs flex items-center gap-1" style={{ color: COLORS.darkGray }}>
-                    {row.label}
-                    {row.tooltip && (
-                      <span className="rho-tooltip-wrap">
-                        <span className="rho-info-icon">i</span>
-                        <span className="rho-tooltip">{row.tooltip}</span>
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-xs font-mono font-bold" style={{ color: row.warn ? COLORS.red : COLORS.text }}>{row.value}</span>
+                <div key={row.label} className="py-1.5 border-b" style={{ borderColor: COLORS.border }}>
+                  <div className="flex justify-between">
+                    <span className="text-xs" style={{ color: COLORS.darkGray }}>{row.label}</span>
+                    <span className="text-xs font-mono font-bold" style={{ color: row.warn ? COLORS.red : COLORS.text }}>{row.value}</span>
+                  </div>
+                  {row.sub && (
+                    <div className="text-[10px] mt-0.5" style={{ color: COLORS.gray }}>{row.sub}</div>
+                  )}
                 </div>
               ))}
             </div>
-            <p style={explainStyle}>
-              {`Right now, there are approximately ${L > 900 ? "∞" : Math.round(L)} samples in the system at any given time. Each sample spends an average of ${W > 900 ? "∞" : (W * 60).toFixed(1)} minutes from deposit to processing — but only ${Tp.toFixed(1)} minutes of that is active handling. The remaining ${Wq > 900 ? "∞" : (Wq * 60).toFixed(1)} minutes (${waitPct}% of total time) is pure waiting. That waiting time is retention time being burned before anyone touches the sample.`}
-              {rho >= 0.90 ? ` At ${rhoPct}% utilization, this is critical — routine samples with 48-hour retention windows are losing ${W > 900 ? "most" : ((W / 48) * 100).toFixed(1) + "%"} of their usable life just sitting in queue.` : ""}
-              {rho >= 0.80 && rho < 0.90 ? ` At ${rhoPct}% utilization, the system is under pressure. Queue times will escalate rapidly if arrivals increase or staffing drops.` : ""}
-              {rho < 0.80 ? ` At ${rhoPct}% utilization, the system is cycling samples efficiently. Most retention windows have ample remaining time for testing.` : ""}
-            </p>
           </div>
 
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
             <h3 className="text-sm font-semibold mb-2" style={{ color: COLORS.text }}>Kingman's Equation (VUT)</h3>
             <div className="text-xs font-mono mb-1 px-3 py-2 rounded" style={{ backgroundColor: "#F8FAFC", color: COLORS.darkGray }}>
-              Tq = (Cₐ² + Cₛ²)/2 × ρ/(1−ρ) × 1/μ
+              Tq = (C\u2090\u00B2 + C\u209B\u00B2)/2 \u00D7 \u03C1/(1-\u03C1) \u00D7 1/\u03BC
             </div>
             <div className="text-center py-3">
               <div className="text-3xl font-bold font-mono" style={{ color: Tq > 2 ? COLORS.red : COLORS.accent }}>
-                {Tq > 900 ? "∞" : (Tq * 60).toFixed(1)}
+                {Tq > 900 ? "\u221E" : Tq.toFixed(2)}
               </div>
-              <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (minutes)</div>
+              <div className="text-xs" style={{ color: COLORS.gray }}>Queue Wait Time (hours)</div>
             </div>
-            <p style={explainStyle}>
-              {`Queue wait time is driven by three multiplied factors. Variability (V = ${V.toFixed(1)}) captures how irregular arrivals and processing are \u2014 ${V > 1.05 ? "your system is more erratic than a purely random process" : V < 0.95 ? "your system is more consistent than random, which helps" : "about average randomness"}. Utilization (U = ${U > 900 ? "\u221E" : U.toFixed(1)}\u00D7) is the amplifier \u2014 ${U > 10 ? `at ${U.toFixed(1)}\u00D7, this is the dominant problem; the system is so full that every bit of variability gets massively amplified` : U > 3 ? `at ${U.toFixed(1)}\u00D7, utilization is significantly amplifying delays` : `at ${U.toFixed(1)}\u00D7, utilization is manageable`}. Process time (T = ${Tp.toFixed(1)} min) is the baseline speed, which is fixed by the equipment.`}
-              {U > 10 ? ` The utilization factor alone is multiplying every delay by ${U.toFixed(1)}\u00D7. This is why adding capacity (lowering \u03C1) has such a dramatic effect \u2014 it attacks the largest multiplier in the equation.` : ""}
-            </p>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={sensitivityData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                <XAxis dataKey="rho" tick={{ fontSize: 10 }}
+                  label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }}
+                  label={{ value: "Tq (hrs)", angle: -90, position: "insideLeft", fontSize: 10 }} />
+                <Tooltip formatter={(v) => [`${v} hrs`, "Tq"]} />
+                <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
-        </div>
-
-        {/* Sensitivity curve — full-width for presentation readability */}
-        <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
-          <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Sensitivity: Queue Wait Time vs Utilization</h3>
-          <ResponsiveContainer width="100%" height={350}>
-            <LineChart data={sensitivityData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-              <XAxis dataKey="rho" tick={{ fontSize: 12 }}
-                label={{ value: "\u03C1 (utilization)", position: "insideBottom", offset: -2, fontSize: 12 }} />
-              <YAxis tick={{ fontSize: 12 }} domain={[0, yAxisMax]}
-                label={{ value: "Tq (min)", angle: -90, position: "insideLeft", fontSize: 12 }} />
-              <Tooltip formatter={(v) => [`${v} min`, "Tq"]} />
-              <Line type="monotone" dataKey="Tq" stroke={COLORS.red} strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <p style={explainStyle}>
-            {rho >= 0.90
-              ? `The lab's current operating point is at ${rhoPct}% utilization \u2014 squarely on the vertical part of the curve. At this position, reducing utilization by just 5\u20138 percentage points would move the operating point back onto the flat part of the curve, cutting queue times dramatically. This is not a linear improvement \u2014 it's an exponential one.`
-              : rho >= 0.80
-              ? `The operating point at ${rhoPct}% shows the lab approaching the inflection point where the curve starts bending sharply upward. A few more percentage points of utilization and queue times will begin escalating rapidly. This is the last window for preventive action before the system degrades.`
-              : `The operating point at ${rhoPct}% sits on the flat part of the curve. Queue times are stable and predictable at this utilization level. The system can absorb moderate surges without cascading delays.`}
-          </p>
         </div>
 
         <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
@@ -1346,44 +1770,49 @@ export default function App() {
             <thead>
               <tr className="border-b" style={{ borderColor: COLORS.border, backgroundColor: "#F8FAFC" }}>
                 <th className="px-3 py-2 text-left font-semibold">Scenario</th>
-                <th className="px-3 py-2 text-center font-semibold">ρ</th>
-                <th className="px-3 py-2 text-center font-semibold">Tq (min)</th>
+                <th className="px-3 py-2 text-center font-semibold">{"\u03C1"}</th>
+                <th className="px-3 py-2 text-center font-semibold">Tq (hrs)</th>
                 <th className="px-3 py-2 text-center font-semibold">Est. Retention Met</th>
                 <th className="px-3 py-2 text-left font-semibold">Notes</th>
               </tr>
             </thead>
             <tbody>
-              {scenarioData.map((s, i) => (
-                <tr key={i} className="border-b" style={{
-                  borderColor: COLORS.border,
-                  backgroundColor: i === 5 ? COLORS.green + "06" : i === 4 ? COLORS.accent + "08" : i === 0 ? COLORS.red + "05" : i === 3 ? COLORS.green + "08" : undefined,
-                }}>
-                  <td className="px-3 py-2 font-medium">{s.name}</td>
-                  <td className="px-3 py-2 text-center font-mono">{typeof s.rho === "number" ? s.rho.toFixed(2) : s.rho}</td>
-                  <td className="px-3 py-2 text-center font-mono font-bold"
-                    style={{ color: (typeof s.tq === "number" ? s.tq : 999) > 180 ? COLORS.red : COLORS.green }}>{s.tq}</td>
-                  <td className="px-3 py-2 text-center">
-                    <span className="font-mono font-bold" style={{ color: parseInt(s.retMet) > 70 ? COLORS.green : COLORS.red }}>{s.retMet}%</span>
-                  </td>
-                  <td className="px-3 py-2" style={{ color: COLORS.gray }}>{s.desc}</td>
-                </tr>
-              ))}
+              {scenarioData.map((s, i) => {
+                // Determine which scenario row best matches the active intervention combination
+                const extraOn = interventions.extraRack;
+                const autoOn = interventions.automatedRetrieval;
+                const smartOn = interventions.smartQueue;
+                const sweepOn = interventions.expirySweep;
+                let matchIdx = -1;
+                if (extraOn && autoOn) matchIdx = 3;
+                else if (extraOn) matchIdx = 1;
+                else if (autoOn) matchIdx = 2;
+                else if (sweepOn) matchIdx = 5;
+                else if (smartOn) matchIdx = 4;
+                const isActive = i === matchIdx;
+                return (
+                  <tr key={i} className="border-b" style={{
+                    borderColor: COLORS.border,
+                    backgroundColor: isActive ? COLORS.accent + "18" : (i === 5 ? COLORS.green + "06" : i === 4 ? COLORS.accent + "08" : i === 0 ? COLORS.red + "05" : i === 3 ? COLORS.green + "08" : undefined),
+                    outline: isActive ? `2px solid ${COLORS.accent}` : "none",
+                  }}>
+                    <td className="px-3 py-2 font-medium">
+                      {isActive && <span className="mr-1.5 text-[10px] font-mono px-1.5 py-0.5 rounded"
+                        style={{ backgroundColor: COLORS.accent, color: "white" }}>LIVE</span>}
+                      {s.name}
+                    </td>
+                    <td className="px-3 py-2 text-center font-mono">{s.rho}</td>
+                    <td className="px-3 py-2 text-center font-mono font-bold"
+                      style={{ color: parseFloat(s.tq) > 3 ? COLORS.red : COLORS.green }}>{s.tq}</td>
+                    <td className="px-3 py-2 text-center">
+                      <span className="font-mono font-bold" style={{ color: parseInt(s.retMet) > 70 ? COLORS.green : COLORS.red }}>{s.retMet}%</span>
+                    </td>
+                    <td className="px-3 py-2" style={{ color: COLORS.gray }}>{s.desc}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-          <p style={explainStyle}>
-            {(() => {
-              const cur = scenarioData[0];
-              const rack = scenarioData[1];
-              const auto = scenarioData[2];
-              const both = scenarioData[3];
-              const curTqMin = typeof cur.tq === "number" ? cur.tq : 0;
-              const rackTqMin = typeof rack.tq === "number" ? rack.tq : 0;
-              const autoTqMin = typeof auto.tq === "number" ? auto.tq : 0;
-              const bothTqMin = typeof both.tq === "number" ? both.tq : 0;
-              const improvement = curTqMin > 0 ? (((curTqMin - rackTqMin) / curTqMin) * 100).toFixed(0) : "0";
-              return `The current state shows ${curTqMin} minutes of queue wait with approximately ${cur.retMet}% retention compliance. Adding one in-department rack increases capacity to 960 slots, dropping \u03C1 to ${(rack.rho * 100).toFixed(0)}% and cutting queue wait to ${rackTqMin} minutes \u2014 a ${improvement}% improvement. Automated retrieval keeps the same capacity but reduces processing variability from ${effectiveCs2.toFixed(1)} to ${autoCs2.toFixed(1)}, lowering queue wait to ${autoTqMin} minutes. Combining both interventions achieves ${(both.rho * 100).toFixed(0)}% utilization with ${bothTqMin} minutes of queue wait and an estimated ${both.retMet}% retention compliance \u2014 the strongest outcome at relatively modest cost.`;
-            })()}
-          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -1404,7 +1833,7 @@ export default function App() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b" style={{ borderColor: COLORS.border }}>
-                  <th className="py-1.5 text-left font-semibold">Dept — Type</th>
+                  <th className="py-1.5 text-left font-semibold">Dept \u2014 Type</th>
                   <th className="py-1.5 text-center font-semibold">Count</th>
                   <th className="py-1.5 text-center font-semibold">%</th>
                 </tr>
@@ -1694,7 +2123,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
+      {toast && <Toast message={toast.message} variant={toast.variant} onClose={() => setToast(null)} />}
 
       {/* Case Brief Modal (Change 1) */}
       {showCaseBrief && (
@@ -1755,13 +2184,13 @@ export default function App() {
                 {tab.id === "alerts" && (alertCounts.red + alertCounts.orange + alertCounts.yellow) > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.red, color: "white" }}>
-                    {badgeCount(alertCounts.red + alertCounts.orange + alertCounts.yellow)}
+                    {alertCounts.red + alertCounts.orange + alertCounts.yellow}
                   </span>
                 )}
                 {tab.id === "notifications" && notifications.filter(n => !n.read).length > 0 && (
                   <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono"
                     style={{ backgroundColor: COLORS.accent, color: "white" }}>
-                    {badgeCount(notifications.filter(n => !n.read).length)}
+                    {notifications.filter(n => !n.read).length}
                   </span>
                 )}
               </button>
@@ -1769,7 +2198,7 @@ export default function App() {
           })}
         </nav>
         <div className="border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
-          <UtilArc used={inDeptCount} total={IN_DEPT_CAPACITY} centralCount={centralCount} />
+          <UtilArc used={inDeptCount} total={effectiveCapacity} centralCount={centralCount} />
         </div>
       </div>
 
@@ -1861,6 +2290,15 @@ export default function App() {
             </button>
           </div>
         )}
+
+        <div className="mx-6 mt-3">
+          <InterventionPanel
+            interventions={interventions}
+            setInterventions={setInterventions}
+            expanded={interventionsExpanded}
+            setExpanded={setInterventionsExpanded}
+          />
+        </div>
 
         <div className="flex-1 overflow-auto p-6">
           {activeTab === "dashboard" && renderDashboard()}

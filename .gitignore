@@ -12,8 +12,8 @@ dist
 dist-ssr
 *.local
 
-# Claude Code config
-.claude/
+# Claude CLI user-local settings (machine-specific permission allowlist)
+.claude/settings.local.json
 
 # Editor directories and files
 .vscode/*
