@@ -115,7 +115,9 @@ function generateSamples(now) {
     const availableTests = TEST_MENU[type] || TEST_MENU.other;
     const numTests = 1 + Math.floor(rng() * Math.min(3, availableTests.length));
     const shuffled = [...availableTests].sort(() => rng() - 0.5);
-    const pendingTests = shuffled.slice(0, numTests);
+    let pendingTests = shuffled.slice(0, numTests);
+    // Seed ~4% of active samples with empty pendingTests so Expiry Sweep has visible effect
+    if (!isDestroyed && rng() < 0.04) pendingTests = [];
 
     const scanError = rng() < 0.05;
     const id = `SMP-${String(1000 + i).padStart(4, "0")}`;
@@ -147,8 +149,12 @@ function generateSamples(now) {
 }
 
 // ─── Utility Functions ──────────────────────────────────────────────────────
-function getRetentionHours(priority, inDeptCount) {
-  const util = inDeptCount / IN_DEPT_CAPACITY;
+function getRetentionHours(priority, inDeptCount, opts) {
+  const capacity = (opts && opts.capacity) || IN_DEPT_CAPACITY;
+  const smartQueue = !!(opts && opts.smartQueue);
+  const util = inDeptCount / capacity;
+  // Smart queue: stat priority is protected from compression
+  if (smartQueue && priority === "stat") return RETENTION_BASE.stat;
   if (util > 0.95) {
     if (priority === "routine") return 8;
     if (priority === "urgent") return 18;
@@ -162,6 +168,14 @@ function getRetentionHours(priority, inDeptCount) {
     if (priority === "urgent") return 48;
   }
   return RETENTION_BASE[priority];
+}
+
+function getRetentionHoursWithStaff(priority, inDeptCount, staffMultiplier, opts) {
+  const base = getRetentionHours(priority, inDeptCount, opts);
+  if (staffMultiplier >= 1.0) return base;
+  const adjusted = Math.round(base * staffMultiplier);
+  const minimums = { stat: 24, urgent: 6, routine: 2 };
+  return Math.max(adjusted, minimums[priority]);
 }
 
 function getDeadline(s) {
@@ -288,6 +302,68 @@ function Toast({ message, onClose }) {
   );
 }
 
+function ToggleSwitch({ checked, onChange, color }) {
+  const c = color || "#2563EB";
+  return (
+    <button type="button" onClick={onChange} aria-pressed={checked}
+      className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer flex-shrink-0"
+      style={{ backgroundColor: checked ? c : "#CBD5E1" }}>
+      <span className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+        style={{ transform: checked ? "translateX(20px)" : "translateX(3px)" }} />
+    </button>
+  );
+}
+
+function InterventionPanel({ interventions, setInterventions, expanded, setExpanded, baselineStats, interventionStats, anyActive }) {
+  const items = [
+    { key: "extraRack", label: "+1 Rack In-Dept", desc: "Capacity 840 \u2192 960 slots", icon: Building2, color: "#2563EB" },
+    { key: "automatedRetrieval", label: "Automated Retrieval", desc: "Eliminates central-storage friction (C\u209B\u00B2 0.9 \u2192 0.4)", icon: Crosshair, color: "#8B5CF6" },
+    { key: "smartQueue", label: "Smart Queue Policy", desc: "Stat samples protected from compression + destruction", icon: Activity, color: "#F59E0B" },
+    { key: "expirySweep", label: "Proactive Expiry Sweep", desc: "Auto-clear samples with all tests complete", icon: RefreshCw, color: "#10B981" },
+  ];
+  const destroyedDelta = baselineStats.destroyed - interventionStats.destroyed;
+  const testsLostDelta = baselineStats.testsLost - interventionStats.testsLost;
+  return (
+    <div className="mx-6 mt-3 bg-white rounded-lg border" style={{ borderColor: "#E2E8F0" }}>
+      <button onClick={() => setExpanded(!expanded)} className="w-full flex items-center gap-3 px-4 py-2.5 cursor-pointer">
+        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        <span className="text-sm font-semibold" style={{ color: "#1E293B" }}>Interventions</span>
+        {anyActive && (
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold"
+            style={{ backgroundColor: "#10B981" + "15", color: "#10B981" }}>LIVE</span>
+        )}
+        {anyActive && destroyedDelta > 0 && (
+          <span className="ml-auto text-[10px] font-mono" style={{ color: "#10B981" }}>
+            {"\u2212"}{destroyedDelta} destroyed {"\u00b7"} {"\u2212"}{testsLostDelta} tests lost vs baseline
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="px-4 pb-3 pt-1 grid grid-cols-4 gap-3 border-t" style={{ borderColor: "#E2E8F0" }}>
+          {items.map(it => {
+            const Icon = it.icon;
+            const on = interventions[it.key];
+            return (
+              <div key={it.key} className="rounded-lg p-3 border flex flex-col gap-2"
+                style={{ borderColor: on ? it.color + "60" : "#E2E8F0", backgroundColor: on ? it.color + "08" : "transparent" }}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Icon size={14} style={{ color: it.color }} />
+                    <span className="text-xs font-semibold" style={{ color: "#1E293B" }}>{it.label}</span>
+                  </div>
+                  <ToggleSwitch checked={on} color={it.color}
+                    onChange={() => setInterventions(p => ({ ...p, [it.key]: !p[it.key] }))} />
+                </div>
+                <div className="text-[10px]" style={{ color: "#64748B" }}>{it.desc}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ───────────────────────────────────────────────────────────────
 export default function App() {
   const [realNow] = useState(() => new Date());
@@ -303,6 +379,17 @@ export default function App() {
   const [demoMode, setDemoMode] = useState(false);
   const [demoStep, setDemoStep] = useState(0);
 
+  // ─── Interventions (Tier 1) ──────────────────────────────────────────
+  const [interventions, setInterventions] = useState({
+    extraRack: false, automatedRetrieval: false, smartQueue: false, expirySweep: false,
+  });
+  const [interventionsExpanded, setInterventionsExpanded] = useState(false);
+  const [baselineStats, setBaselineStats] = useState({ destroyed: 0, testsLost: 0 });
+  const [interventionStats, setInterventionStats] = useState({ destroyed: 0, testsLost: 0 });
+  const [baselineInDeptCount, setBaselineInDeptCount] = useState(null);
+  const [addOnPatientId, setAddOnPatientId] = useState("");
+  const [addOnResult, setAddOnResult] = useState(null);
+
   const [invFilters, setInvFilters] = useState({
     department: "all", priority: "all", type: "all",
     location: "all", status: "all", scanOnly: false, search: "",
@@ -314,6 +401,7 @@ export default function App() {
   const [intakeForm, setIntakeForm] = useState({
     patientId: "", type: "blood", department: "emergency",
     physician: PHYSICIANS[0], priority: "routine", tests: [],
+    rackNum: "", rackPosition: "",
   });
 
   const [analyticsParams, setAnalyticsParams] = useState({
@@ -366,6 +454,10 @@ export default function App() {
   const centralCount = centralSamples.length;
   const utilPct = (inDeptCount / IN_DEPT_CAPACITY) * 100;
   const scanErrorCount = useMemo(() => activeSamples.filter(s => s.scanError).length, [activeSamples]);
+
+  // Intervention-derived values
+  const effectiveCapacity = interventions.extraRack ? 960 : IN_DEPT_CAPACITY;
+  const anyInterventionActive = interventions.extraRack || interventions.automatedRetrieval || interventions.smartQueue || interventions.expirySweep;
 
   // ─── Case Brief Stats (Change 1) ─────────────────────────────────────
   const caseBriefStats = useMemo(() => {
@@ -459,15 +551,52 @@ export default function App() {
       // Merge new arrivals into the sample set
       const allSamples = [...prevSamples, ...newArrivals];
 
+      // ── SHADOW SIMULATION: counter-factual baseline (no interventions) ──
+      // Re-run PHASE 1 + PHASE 2 without any intervention logic so we can
+      // report "how many would have been destroyed without interventions".
+      const shadowDestroyedIds = new Set();
+      allSamples.forEach(s => {
+        if (s.destroyed) return;
+        const baseRet = RETENTION_BASE[s.priority];
+        const elapsed = (futureNow - s.depositTime) / 3600000;
+        if (elapsed >= baseRet) shadowDestroyedIds.add(s.id);
+      });
+      const shadowInDept = allSamples.filter(x => !x.destroyed && !shadowDestroyedIds.has(x.id) && x.location === "in-department").length;
+      allSamples.forEach(s => {
+        if (s.destroyed || shadowDestroyedIds.has(s.id)) return;
+        const newRet = getRetentionHours(s.priority, shadowInDept);
+        const deadline = new Date(s.depositTime.getTime() + newRet * 3600000);
+        if (futureNow >= deadline) shadowDestroyedIds.add(s.id);
+      });
+      let shadowDestroyed = 0;
+      let shadowTestsLost = 0;
+      allSamples.forEach(s => {
+        if (shadowDestroyedIds.has(s.id)) {
+          shadowDestroyed++;
+          shadowTestsLost += s.pendingTests.length;
+        }
+      });
+      setTimeout(() => {
+        setBaselineStats({ destroyed: shadowDestroyed, testsLost: shadowTestsLost });
+        setBaselineInDeptCount(shadowInDept);
+      }, 0);
+
       // ── PHASE 1: Expiry Sweep ──────────────────────────────────────────
       // Destroy samples that exceeded their FULL (un-shortened) base retention.
       // This runs BEFORE capacity-pressure logic so freed slots reduce utilization.
+      // If the Proactive Expiry Sweep intervention is ON, also auto-clear any
+      // sample whose pendingTests array is empty (all tests complete).
       let swept = 0;
       allSamples.forEach(s => {
         if (s.destroyed) { updatedMap[s.id] = s; return; }
         const baseRetention = RETENTION_BASE[s.priority];
         const elapsed = (futureNow - s.depositTime) / 3600000;
         if (elapsed >= baseRetention) {
+          swept++;
+          updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "expired" };
+          return;
+        }
+        if (interventions.expirySweep && s.pendingTests.length === 0) {
           swept++;
           updatedMap[s.id] = { ...s, status: "destroyed", destroyed: true, destroyedAt: futureNow, destructionReason: "expired" };
         }
@@ -482,14 +611,20 @@ export default function App() {
       const orangeByDept = {};
       const yellowByDept = {};
 
+      const opts = { capacity: effectiveCapacity, smartQueue: interventions.smartQueue };
       allSamples.forEach(s => {
         if (updatedMap[s.id]) return; // already swept or was already destroyed
-        const newRetention = getRetentionHours(s.priority, inDeptAfterSweep);
+        const newRetention = getRetentionHours(s.priority, inDeptAfterSweep, opts);
         const deadline = new Date(s.depositTime.getTime() + newRetention * 3600000);
         const prevPct = ((prevNow - s.depositTime) / 3600000 / s.retentionHours) * 100;
         const newPct = ((futureNow - s.depositTime) / 3600000 / newRetention) * 100;
 
         if (futureNow >= deadline) {
+          // Smart queue: stat samples are protected from capacity-pressure destruction
+          if (interventions.smartQueue && s.priority === "stat") {
+            updatedMap[s.id] = { ...s, retentionHours: newRetention };
+            return;
+          }
           pastDeadline.push({ ...s, retentionHours: newRetention });
         } else {
           if (prevPct < 100 && newPct >= 100) {
@@ -576,6 +711,12 @@ export default function App() {
       // Update sweep count for dashboard display
       setTimeout(() => setSweepCount(swept), 0);
 
+      // Track intervention stats — destructions that happened during THIS cycle
+      const intvDestroyedThisCycle = updated.filter(s => s.destroyed && s.destroyedAt && s.destroyedAt.getTime() === futureNow.getTime());
+      const intvDestroyed = intvDestroyedThisCycle.length;
+      const intvTestsLost = intvDestroyedThisCycle.reduce((sum, s) => sum + s.pendingTests.length, 0);
+      setTimeout(() => setInterventionStats({ destroyed: intvDestroyed, testsLost: intvTestsLost }), 0);
+
       if (newNotifs.length > 0) {
         setTimeout(() => {
           setNotifNextId(prevId => {
@@ -591,7 +732,7 @@ export default function App() {
       return updated;
     });
     setClockOffset(prev => prev + 6);
-  }, [realNow, clockOffset]);
+  }, [realNow, clockOffset, interventions, effectiveCapacity]);
 
   const completeTest = useCallback((sampleId, testName) => {
     setSamples(prev => prev.map(s =>
@@ -623,14 +764,38 @@ export default function App() {
 
   const addSample = useCallback(() => {
     const form = intakeForm;
-    if (!form.patientId.trim()) return;
-    const loc = inDeptCount >= IN_DEPT_CAPACITY * 0.9 ? "central-storage" : "in-department";
-    const rackNum = loc === "in-department"
-      ? Math.floor(Math.random() * IN_DEPT_RACKS) + 1
-      : IN_DEPT_RACKS + Math.floor(Math.random() * CENTRAL_RACKS) + 1;
-    const rackId = `RACK-${String(rackNum).padStart(2, "0")}`;
-    const pos = Math.floor(Math.random() * RACK_CAPACITY) + 1;
-    const retention = getRetentionHours(form.priority, inDeptCount);
+    if (!form.patientId.trim()) { showToast("Patient ID is required"); return; }
+    const manualRack = form.rackNum && form.rackPosition;
+    let rackNum, rackId, pos, loc;
+
+    if (manualRack) {
+      rackNum = parseInt(form.rackNum);
+      pos = parseInt(form.rackPosition);
+      if (isNaN(rackNum) || rackNum < 1 || rackNum > (IN_DEPT_RACKS + CENTRAL_RACKS)) {
+        showToast(`Rack number must be 1-${IN_DEPT_RACKS + CENTRAL_RACKS}`);
+        return;
+      }
+      if (isNaN(pos) || pos < 1 || pos > RACK_CAPACITY) {
+        showToast(`Position must be 1-${RACK_CAPACITY}`);
+        return;
+      }
+      const targetRackId = `RACK-${String(rackNum).padStart(2, "0")}`;
+      const collision = samples.find(s => !s.destroyed && s.rackId === targetRackId && s.rackPosition === pos);
+      if (collision) {
+        showToast(`Scan collision: ${collision.id} already at rack ${rackNum} position ${pos}`);
+        return;
+      }
+      rackId = targetRackId;
+      loc = rackNum <= IN_DEPT_RACKS ? "in-department" : "central-storage";
+    } else {
+      loc = inDeptCount >= effectiveCapacity * 0.9 ? "central-storage" : "in-department";
+      rackNum = loc === "in-department"
+        ? Math.floor(Math.random() * IN_DEPT_RACKS) + 1
+        : IN_DEPT_RACKS + Math.floor(Math.random() * CENTRAL_RACKS) + 1;
+      rackId = `RACK-${String(rackNum).padStart(2, "0")}`;
+      pos = Math.floor(Math.random() * RACK_CAPACITY) + 1;
+    }
+    const retention = getRetentionHours(form.priority, inDeptCount, { capacity: effectiveCapacity, smartQueue: interventions.smartQueue });
     const newSample = {
       id: `SMP-${String(2000 + samples.length).padStart(4, "0")}`,
       patientId: form.patientId, rackId, rackPosition: pos, scanError: false,
@@ -642,8 +807,8 @@ export default function App() {
     };
     setSamples(prev => [newSample, ...prev]);
     showToast(`Sample ${newSample.id} admitted to ${rackId}, Position ${pos}`);
-    setIntakeForm({ patientId: "", type: "blood", department: "emergency", physician: PHYSICIANS[0], priority: "routine", tests: [] });
-  }, [intakeForm, inDeptCount, samples.length, now, showToast]);
+    setIntakeForm({ patientId: "", type: "blood", department: "emergency", physician: PHYSICIANS[0], priority: "routine", tests: [], rackNum: "", rackPosition: "" });
+  }, [intakeForm, inDeptCount, samples, now, showToast, effectiveCapacity, interventions.smartQueue]);
 
   // ─── Demo Mode (Change 6) ────────────────────────────────────────────
   const DEMO_STEPS = [
@@ -656,6 +821,13 @@ export default function App() {
     { label: "Watch It Break More", action: () => { advanceClock(); } },
     { label: "Notification Cascade", action: () => setActiveTab("notifications") },
     { label: "What Fixes It", action: () => setActiveTab("analytics") },
+    { label: "Interventions Live", action: () => {
+        setInterventions({ extraRack: true, automatedRetrieval: true, smartQueue: true, expirySweep: true });
+        setInterventionsExpanded(true);
+        setActiveTab("dashboard");
+        setTimeout(() => advanceClock(), 120);
+        setTimeout(() => advanceClock(), 360);
+      } },
     { label: "The Aftermath", action: () => setActiveTab("destruction") },
   ];
 
@@ -753,6 +925,31 @@ export default function App() {
             })}
           </div>
         </div>
+
+        {anyInterventionActive && baselineInDeptCount !== null && (
+          <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
+            <h3 className="text-sm font-semibold mb-3" style={{ color: COLORS.text }}>Baseline vs Interventions (last cycle)</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="rounded-lg p-3 border" style={{ borderColor: COLORS.red + "30", backgroundColor: COLORS.red + "06" }}>
+                <div className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: COLORS.red }}>Baseline (no interventions)</div>
+                <div className="flex gap-4">
+                  <div><div className="text-2xl font-bold font-mono" style={{ color: COLORS.red }}>{baselineStats.destroyed}</div><div className="text-[10px]" style={{ color: COLORS.darkGray }}>destroyed</div></div>
+                  <div><div className="text-2xl font-bold font-mono" style={{ color: COLORS.red }}>{baselineStats.testsLost}</div><div className="text-[10px]" style={{ color: COLORS.darkGray }}>tests lost</div></div>
+                </div>
+              </div>
+              <div className="rounded-lg p-3 border" style={{ borderColor: COLORS.green + "30", backgroundColor: COLORS.green + "06" }}>
+                <div className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: COLORS.green }}>With interventions</div>
+                <div className="flex gap-4">
+                  <div><div className="text-2xl font-bold font-mono" style={{ color: COLORS.green }}>{interventionStats.destroyed}</div><div className="text-[10px]" style={{ color: COLORS.darkGray }}>destroyed</div></div>
+                  <div><div className="text-2xl font-bold font-mono" style={{ color: COLORS.green }}>{interventionStats.testsLost}</div><div className="text-[10px]" style={{ color: COLORS.darkGray }}>tests lost</div></div>
+                </div>
+              </div>
+            </div>
+            <div className="text-[10px] italic mt-2" style={{ color: COLORS.gray }}>
+              Baseline is a shadow simulation of the same 6-hour cycle without any interventions enabled.
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1018,8 +1215,8 @@ export default function App() {
   // ─── RENDER: Intake ───────────────────────────────────────────────────
   function renderIntake() {
     const availTests = TEST_MENU[intakeForm.type] || TEST_MENU.other;
-    const suggestedLoc = inDeptCount >= IN_DEPT_CAPACITY * 0.9 ? "Central Storage" : "In-Department";
-    const assignedRetention = getRetentionHours(intakeForm.priority, inDeptCount);
+    const suggestedLoc = inDeptCount >= effectiveCapacity * 0.9 ? "Central Storage" : "In-Department";
+    const assignedRetention = getRetentionHours(intakeForm.priority, inDeptCount, { capacity: effectiveCapacity, smartQueue: interventions.smartQueue });
 
     return (
       <div className="tab-content">
@@ -1059,6 +1256,24 @@ export default function App() {
                 {PHYSICIANS.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>Rack # (optional)</label>
+                <input type="number" min="1" max={IN_DEPT_RACKS + CENTRAL_RACKS} placeholder={`1-${IN_DEPT_RACKS + CENTRAL_RACKS}`}
+                  value={intakeForm.rackNum}
+                  onChange={e => setIntakeForm(p => ({ ...p, rackNum: e.target.value }))}
+                  className="w-full px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                  style={{ borderColor: COLORS.border }} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>Position (optional)</label>
+                <input type="number" min="1" max={RACK_CAPACITY} placeholder={`1-${RACK_CAPACITY}`}
+                  value={intakeForm.rackPosition}
+                  onChange={e => setIntakeForm(p => ({ ...p, rackPosition: e.target.value }))}
+                  className="w-full px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                  style={{ borderColor: COLORS.border }} />
+              </div>
+            </div>
             <div>
               <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>Priority</label>
               <div className="flex gap-3">
@@ -1091,6 +1306,21 @@ export default function App() {
                 ))}
               </div>
             </div>
+            {intakeForm.rackNum && intakeForm.rackPosition && (() => {
+              const rn = parseInt(intakeForm.rackNum);
+              const rp = parseInt(intakeForm.rackPosition);
+              if (isNaN(rn) || isNaN(rp)) return null;
+              const collision = samples.find(s => !s.destroyed && s.rackId === `RACK-${String(rn).padStart(2, "0")}` && s.rackPosition === rp);
+              if (collision) {
+                return (
+                  <div className="rounded-lg px-3 py-2 text-xs flex items-center gap-2"
+                    style={{ backgroundColor: COLORS.red + "10", color: COLORS.red, border: `1px solid ${COLORS.red}40` }}>
+                    <AlertTriangle size={14} /> Scan collision: {collision.id} already at rack {rn} position {rp}
+                  </div>
+                );
+              }
+              return null;
+            })()}
             <button onClick={addSample}
               className="w-full py-2.5 rounded-lg text-sm font-semibold text-white cursor-pointer"
               style={{ backgroundColor: COLORS.accent }}>Admit Sample</button>
@@ -1137,6 +1367,68 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* Add-On Test Request panel (Tier 2) */}
+        <div className="bg-white rounded-lg p-5 border mt-6" style={{ borderColor: COLORS.border }}>
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: COLORS.text }}>
+            <Plus size={14} style={{ color: COLORS.accent }} /> Add-On Test Request
+          </h3>
+          <div className="flex gap-2 items-end mb-3">
+            <div className="flex-1">
+              <label className="block text-xs font-medium mb-1" style={{ color: COLORS.darkGray }}>Patient ID</label>
+              <input type="text" placeholder="PT-XXXXX" value={addOnPatientId}
+                onChange={e => setAddOnPatientId(e.target.value)}
+                className="w-full px-3 py-2 rounded border text-sm font-mono outline-none focus:ring-1 focus:ring-blue-400"
+                style={{ borderColor: COLORS.border }} />
+            </div>
+            <button onClick={() => {
+                const q = addOnPatientId.trim();
+                if (!q) { setAddOnResult(null); return; }
+                const hits = samples.filter(s => s.patientId.toLowerCase() === q.toLowerCase());
+                if (hits.length === 0) { setAddOnResult({ state: "not-found" }); return; }
+                const active = hits.find(s => !s.destroyed);
+                if (active) { setAddOnResult({ state: "found", sample: active, testsPending: active.pendingTests.length }); return; }
+                const destroyed = hits[0];
+                setAddOnResult({ state: "destroyed", sample: destroyed });
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-semibold text-white cursor-pointer"
+              style={{ backgroundColor: COLORS.accent }}>Look up</button>
+          </div>
+          {addOnResult && addOnResult.state === "not-found" && (
+            <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: COLORS.gray + "10", color: COLORS.darkGray }}>
+              No sample found for patient {addOnPatientId}.
+            </div>
+          )}
+          {addOnResult && addOnResult.state === "destroyed" && (
+            <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: COLORS.red + "10", color: COLORS.red, border: `1px solid ${COLORS.red}40` }}>
+              <div className="font-semibold mb-1">Sample already destroyed</div>
+              Patient {addOnResult.sample.patientId}{"\u2019"}s sample ({addOnResult.sample.id}) was destroyed on {formatDate(addOnResult.sample.destroyedAt)}. A new draw will be required.
+            </div>
+          )}
+          {addOnResult && addOnResult.state === "found" && (() => {
+            const hit = addOnResult.sample;
+            const note = hit.location === "in-department"
+              ? "Sample located in-department \u2014 immediate access."
+              : interventions.automatedRetrieval
+                ? "Sample in central storage \u2014 automated retrieval will dispatch."
+                : "Sample in central storage \u2014 requires manual retrieval (~20 min).";
+            return (
+              <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: COLORS.green + "08", color: COLORS.text, border: `1px solid ${COLORS.green}40` }}>
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <CheckCircle size={14} style={{ color: COLORS.green }} />
+                  <span className="font-semibold">Sample available: {hit.id}</span>
+                  <PriorityBadge priority={hit.priority} />
+                  <span style={{ color: COLORS.darkGray }}>{DEPT_LABELS[hit.department]}</span>
+                  <span className="ml-auto font-mono" style={{ color: COLORS.gray }}>{hit.rackId}-{hit.rackPosition}</span>
+                </div>
+                <div style={{ color: COLORS.darkGray }}>{note}</div>
+                <div className="mt-1" style={{ color: COLORS.gray }}>
+                  {addOnResult.testsPending} test(s) currently pending. Remaining retention: {getRemainingStr(hit, now)}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
       </div>
     );
   }
@@ -1144,8 +1436,13 @@ export default function App() {
   // ─── RENDER: Analytics ────────────────────────────────────────────────
   function renderAnalytics() {
     const { lambda, mu, ca2, cs2, staffMultiplier } = analyticsParams;
-    const effectiveMu = mu * staffMultiplier;
-    const effectiveCs2 = Math.min(2.0, cs2 + Math.max(0, (1.0 - staffMultiplier) / 0.1) * 0.15);
+    // Interventions fold into effective parameters:
+    //   expirySweep → μ × 1.05 (fewer stale samples lingering)
+    //   automatedRetrieval → C_s² floor at 0.4 (eliminates central-storage friction)
+    const staffAdjustedMu = mu * staffMultiplier;
+    const effectiveMu = staffAdjustedMu * (interventions.expirySweep ? 1.05 : 1.0);
+    const baseCs2 = interventions.automatedRetrieval ? 0.4 : cs2;
+    const effectiveCs2 = Math.min(2.0, baseCs2 + Math.max(0, (1.0 - staffMultiplier) / 0.1) * 0.15);
     const rho = lambda / effectiveMu;
     const Tq = rho > 0 && rho < 1 ? ((ca2 + effectiveCs2) / 2) * (rho / (1 - rho)) * (1 / effectiveMu) : 999;
     const serviceTime = 1 / effectiveMu; // hours per sample
@@ -1174,7 +1471,7 @@ export default function App() {
       { name: "+1 Rack In-Dept", rho: rhoRack, cs2Used: effectiveCs2, muUsed: rackMu, desc: "960 slot capacity" },
       { name: "Automated Retrieval", rho: rho, cs2Used: autoCs2, muUsed: effectiveMu, desc: "Reduced service variability" },
       { name: "Both Interventions", rho: rhoBoth, cs2Used: autoCs2, muUsed: rackMu, desc: "Expanded + automated" },
-      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Routine-first destruction — no capital cost", retOverride: 87 },
+      { name: "Smart Queue Policy", rho: rho, cs2Used: effectiveCs2, muUsed: effectiveMu, desc: "Stat samples protected from compression + destruction — no capital cost", retOverride: 87 },
       { name: "Expiry Sweep", rho: lambda / (effectiveMu * 1.05), cs2Used: effectiveCs2, muUsed: effectiveMu * 1.05, desc: "Proactive expired sample clearance — μ×1.05" },
     ];
     const scenarioData = scenarios.map(s => {
@@ -1263,8 +1560,29 @@ export default function App() {
               : rho >= 0.80
               ? `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system is approaching the critical threshold. It can still absorb minor variation, but any increase in arrivals or decrease in staffing will push it into the danger zone.`
               : `The lab is receiving ${lambda.toFixed(1)} samples per hour against a processing capacity of ${effectiveMu.toFixed(1)} per hour, putting utilization at ${rhoPct}%. The system has healthy slack capacity. Arrival surges and processing inconsistencies can be absorbed without significant queue buildup.`}
+            {interventions.extraRack ? " Capacity has been expanded to 960 slots via the +1 Rack intervention." : ""}
           </p>
         </div>
+
+        {anyInterventionActive && (
+          <div className="rounded-lg p-3 border" style={{ backgroundColor: "#10B981" + "08", borderColor: "#10B981" + "40" }}>
+            <div className="flex items-center gap-2 text-xs flex-wrap" style={{ color: "#10B981" }}>
+              <CheckCircle size={14} />
+              <span className="font-semibold">Interventions active</span>
+              <span style={{ color: COLORS.darkGray }}>
+                {[
+                  interventions.extraRack && "+1 Rack (capacity 960)",
+                  interventions.automatedRetrieval && "Auto retrieval (C\u209B\u00B2=0.4)",
+                  interventions.smartQueue && "Smart queue",
+                  interventions.expirySweep && "Expiry sweep (\u03BC \u00D7 1.05)",
+                ].filter(Boolean).join(" \u00b7 ")}
+              </span>
+            </div>
+            <div className="text-[10px] mt-1" style={{ color: COLORS.darkGray }}>
+              All calculations below reflect current intervention toggles.
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-white rounded-lg p-4 border" style={{ borderColor: COLORS.border }}>
@@ -1353,12 +1671,28 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {scenarioData.map((s, i) => (
+              {scenarioData.map((s, i) => {
+                const isLive = (
+                  (i === 1 && interventions.extraRack && !interventions.automatedRetrieval) ||
+                  (i === 2 && interventions.automatedRetrieval && !interventions.extraRack) ||
+                  (i === 3 && interventions.extraRack && interventions.automatedRetrieval) ||
+                  (i === 4 && interventions.smartQueue) ||
+                  (i === 5 && interventions.expirySweep)
+                );
+                return (
                 <tr key={i} className="border-b" style={{
                   borderColor: COLORS.border,
-                  backgroundColor: i === 5 ? COLORS.green + "06" : i === 4 ? COLORS.accent + "08" : i === 0 ? COLORS.red + "05" : i === 3 ? COLORS.green + "08" : undefined,
+                  backgroundColor: isLive ? "#10B981" + "10" : (i === 5 ? COLORS.green + "06" : i === 4 ? COLORS.accent + "08" : i === 0 ? COLORS.red + "05" : i === 3 ? COLORS.green + "08" : undefined),
                 }}>
-                  <td className="px-3 py-2 font-medium">{s.name}</td>
+                  <td className="px-3 py-2 font-medium">
+                    <span className="flex items-center gap-1.5">
+                      {s.name}
+                      {isLive && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
+                          style={{ backgroundColor: "#10B981" + "20", color: "#10B981" }}>LIVE</span>
+                      )}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 text-center font-mono">{typeof s.rho === "number" ? s.rho.toFixed(2) : s.rho}</td>
                   <td className="px-3 py-2 text-center font-mono font-bold"
                     style={{ color: (typeof s.tq === "number" ? s.tq : 999) > 180 ? COLORS.red : COLORS.green }}>{s.tq}</td>
@@ -1367,7 +1701,8 @@ export default function App() {
                   </td>
                   <td className="px-3 py-2" style={{ color: COLORS.gray }}>{s.desc}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           <p style={explainStyle}>
@@ -1861,6 +2196,16 @@ export default function App() {
             </button>
           </div>
         )}
+
+        <InterventionPanel
+          interventions={interventions}
+          setInterventions={setInterventions}
+          expanded={interventionsExpanded}
+          setExpanded={setInterventionsExpanded}
+          baselineStats={baselineStats}
+          interventionStats={interventionStats}
+          anyActive={anyInterventionActive}
+        />
 
         <div className="flex-1 overflow-auto p-6">
           {activeTab === "dashboard" && renderDashboard()}
